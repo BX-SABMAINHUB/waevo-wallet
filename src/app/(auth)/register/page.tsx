@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   createUserWithEmailAndPassword,
-  sendEmailVerification,
   updateProfile,
 } from "firebase/auth";
 import { auth } from "@/lib/firebase";
@@ -26,13 +25,35 @@ export default function RegisterPage() {
     e.preventDefault();
     setError("");
     setLoading(true);
+    
     try {
+      // 1. Crear el usuario en Firebase Auth
       const cred = await createUserWithEmailAndPassword(auth, email, password);
       await updateProfile(cred.user, { displayName: name });
-      await sendEmailVerification(cred.user);
+      
+      // 2. Llamar a nuestra API para enviar el correo con EmailJS
+      const response = await fetch('/api/send-verification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Error al enviar el correo de verificación.');
+      }
+
+      // 3. Pasar a la pantalla de verificación
       setStep("verify");
     } catch (err: any) {
-      setError(err.message || "Error al crear la cuenta");
+      // Manejar errores comunes de Firebase (ej. correo ya en uso)
+      let errorMessage = err.message || "Error al crear la cuenta";
+      if (err.code === "auth/email-already-in-use") {
+        errorMessage = "Este correo electrónico ya está registrado.";
+      } else if (err.code === "auth/weak-password") {
+        errorMessage = "La contraseña es demasiado débil (mínimo 6 caracteres).";
+      }
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -40,13 +61,24 @@ export default function RegisterPage() {
 
   const handleVerified = async () => {
     if (!auth.currentUser) return;
-    await auth.currentUser.reload();
-    if (auth.currentUser.emailVerified) {
-      // Aquí iría la inscripción TOTP (2FA) que ya teníamos.
-      // Por ahora redirigimos al dashboard.
-      router.push("/explore");
-    } else {
-      setError("Aún no has verificado tu correo. Revisa tu bandeja de entrada.");
+    
+    setLoading(true);
+    setError("");
+    
+    try {
+      // Recargar el usuario para obtener el estado actual de verificación
+      await auth.currentUser.reload();
+      
+      if (auth.currentUser.emailVerified) {
+        // ¡Correo verificado! Redirigimos al dashboard/billetera
+        router.push("/explore");
+      } else {
+        setError("Aún no has verificado tu correo. Revisa tu bandeja de entrada o spam.");
+      }
+    } catch (err: any) {
+      setError("Error al comprobar la verificación.");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -57,20 +89,26 @@ export default function RegisterPage() {
         animate={{ opacity: 1, y: 0 }}
         className="rounded-2xl glass p-8 text-center shadow-2xl"
       >
+        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-indigo-500/20 text-indigo-400">
+          <Mail size={32} />
+        </div>
         <h1 className="text-2xl font-bold">Verifica tu correo</h1>
-        <p className="mt-2 text-sm text-slate-400">
-          Hemos enviado un enlace a <strong className="text-white">{email}</strong>.
+        <p className="mt-3 text-sm text-slate-400 leading-relaxed">
+          Hemos enviado un enlace a <strong className="text-white">{email}</strong>.<br/>
           Ábrelo y luego pulsa el botón de abajo.
         </p>
+        
+        {error && <p className="mt-4 text-xs text-red-400 bg-red-500/10 p-2 rounded-lg">{error}</p>}
+        
         <motion.button
           onClick={handleVerified}
-          whileHover={{ scale: 1.03 }}
-          whileTap={{ scale: 0.97 }}
-          className="mt-6 w-full rounded-xl bg-indigo-600 py-2.5 text-sm font-semibold text-white"
+          disabled={loading}
+          whileHover={{ scale: 1.02 }}
+          whileTap={{ scale: 0.98 }}
+          className="mt-8 w-full rounded-xl bg-indigo-600 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/20 disabled:opacity-60"
         >
-          Ya he verificado mi correo
+          {loading ? "Comprobando..." : "Ya he verificado mi correo"}
         </motion.button>
-        {error && <p className="mt-4 text-xs text-red-400">{error}</p>}
       </motion.div>
     );
   }
@@ -159,14 +197,18 @@ export default function RegisterPage() {
           </div>
         </div>
 
-        {error && <p className="text-xs text-red-400">{error}</p>}
+        {error && (
+          <div className="rounded-lg bg-red-500/10 p-3 text-xs text-red-400 border border-red-500/20">
+            {error}
+          </div>
+        )}
 
         <motion.button
           type="submit"
           disabled={loading}
           whileHover={{ scale: 1.02 }}
           whileTap={{ scale: 0.98 }}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-400 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 disabled:opacity-60"
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-400 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 disabled:opacity-60"
         >
           {loading ? "Creando cuenta..." : "Crear cuenta"}
           {!loading && <ArrowRight size={16} />}
