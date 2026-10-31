@@ -1,10 +1,13 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Excluye 'lightweight-charts' del bundle del servidor.
-  // Esto evita el error "createContext is not a function" durante el build,
-  // ya que la librería solo debe ejecutarse en el navegador.
-  serverExternalPackages: ["lightweight-charts"],
+  webpack: (config, { isServer }) => {
+    if (isServer) {
+      // Evita que Webpack resuelva la librería en el servidor
+      config.resolve.alias["lightweight-charts"] = false;
+    }
+    return config;
+  },
 };
 
 export default nextConfig;
