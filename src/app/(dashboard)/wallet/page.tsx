@@ -120,11 +120,10 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
-  // --- GENERACIÓN DE DIRECCIÓN DETERMINISTA (PERMANENTE) ---
+  // --- GENERACIÓN DE DIRECCIÓN PERMANENTE CON LOCALSTORAGE ---
   const handleOpenReceive = async (coin: Coin) => {
     if (!embeddedWallet || !uid) return;
 
-    // Si ya tenemos la dirección en memoria, la usamos
     if (depositAddresses[coin.id]) {
       setSelectedCoin(coin);
       setModalType("receive");
@@ -133,14 +132,28 @@ export default function WalletPage() {
 
     setIsGeneratingAddress(true);
     try {
+      // 1. Buscamos la xpub guardada para esta moneda en localStorage
+      const xpubKey = `waevo_xpub_${coin.symbol.toUpperCase()}`;
+      const savedXpub = localStorage.getItem(xpubKey);
+
+      // 2. Llamamos a la API pasándole la xpub (si existe)
       const res = await fetch('/api/generate-address', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: coin.symbol, userId: uid }),
+        body: JSON.stringify({ 
+          symbol: coin.symbol, 
+          userId: uid,
+          xpub: savedXpub // Puede ser null la primera vez
+        }),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Error generando dirección');
+
+      // 3. Guardamos la xpub devuelta en localStorage para futuras sesiones
+      if (data.xpub) {
+        localStorage.setItem(xpubKey, data.xpub);
+      }
 
       setDepositAddresses(prev => ({ ...prev, [coin.id]: data.address }));
       setSelectedCoin(coin);
