@@ -1,147 +1,139 @@
 import { NextResponse } from 'next/server';
 
-// Mapeo de símbolos a los nombres de cadena de Tatum v4 (formato: chain-mainnet)
-const TATUM_CHAIN_MAP: Record<string, string> = {
-  BTC: 'bitcoin-mainnet',
-  LTC: 'litecoin-mainnet',
-  DOGE: 'dogecoin-mainnet',
-  BCH: 'bitcoin-cash-mainnet',
-  ETH: 'ethereum-mainnet',
-  MATIC: 'polygon-mainnet',
+// Mapeo de símbolos a los slugs de cadena de Blockchair
+const BLOCKCHAIR_CHAIN_MAP: Record<string, string> = {
+  BTC: 'bitcoin',
+  LTC: 'litecoin',
+  DOGE: 'dogecoin',
+  BCH: 'bitcoin-cash',
+  ETH: 'ethereum',
+  MATIC: 'polygon',
 };
 
-// Cadenas que usan el endpoint de historial de UTXOs en v4
-const UTXO_CHAINS = ['bitcoin-mainnet', 'litecoin-mainnet', 'dogecoin-mainnet', 'bitcoin-cash-mainnet'];
-
 export async function POST(request: Request) {
+  const startTime = Date.now();
+  console.log(`\n[CHECK-DEPOSITS] Iniciando verificación con Blockchair...`);
+
   try {
-    const { symbol, address } = await request.json();
+    const body = await request.json();
+    const { symbol, address } = body;
+
     if (!symbol || !address) {
+      console.error(`❌ Faltan parámetros: symbol=${symbol}, address=${address}`);
       return NextResponse.json({ error: 'Faltan símbolo o dirección' }, { status: 400 });
     }
 
     const upperSymbol = symbol.toUpperCase();
-    const chain = TATUM_CHAIN_MAP[upperSymbol];
-    const apiKey = process.env.TATUM_API_KEY;
+    const chain = BLOCKCHAIR_CHAIN_MAP[upperSymbol];
 
     if (!chain) {
-      return NextResponse.json({ error: `Red no soportada: ${upperSymbol}` }, { status: 400 });
-    }
-    if (!apiKey) {
-      return NextResponse.json({ error: 'API Key de Tatum no configurada' }, { status: 500 });
+      console.error(`❌ Red no soportada: ${upperSymbol}`);
+      return NextResponse.json({ error: `Red ${upperSymbol} no soportada` }, { status: 400 });
     }
 
-    // 1. Obtener la altura actual del bloque usando el endpoint v4
-    console.log(`[CHECK-DEPOSITS] Obteniendo altura de ${chain} (v4)...`);
-    const blockUrl = `https://api.tatum.io/v4/data/blockchains/block/current?chain=${chain}`;
-    const blockRes = await fetch(blockUrl, {
-      headers: { 'x-api-key': apiKey },
+    console.log(`🔍 Consultando ${chain} para: ${address}`);
+
+    // 🔴 CRÍTICO: transaction_details=true es OBLIGATORIO
+    const url = new URL(`https://api.blockchair.com/${chain}/dashboards/address/${address}`);
+    url.searchParams.append('transaction_details', 'true');
+    url.searchParams.append('limit', '20'); // Últimas 20 transacciones
+
+    console.log(`📡 Petición: ${url.toString()}`);
+
+    const res = await fetch(url.toString(), {
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(10000) // Timeout de 10s
     });
 
-    if (!blockRes.ok) {
-      const errText = await blockRes.text();
-      console.error(`[CHECK-DEPOSITS] Error en /block/current: ${blockRes.status} - ${errText}`);
-      throw new Error(`Error Tatum (block): ${blockRes.status}`);
+    if (!res.ok) {
+      if (res.status === 402) {
+        console.error('❌ Límite de peticiones a Blockchair excedido (402)');
+        return NextResponse.json(
+          { error: 'Límite de consultas excedido. Espera un minuto.' },
+          { status: 429 }
+        );
+      }
+      const errorText = await res.text();
+      console.error(`❌ Blockchair error ${res.status}:`, errorText);
+      throw new Error(`Blockchair respondió ${res.status}: ${errorText.substring(0, 200)}`);
     }
 
-    const blockData = await blockRes.json();
-    // Intentamos extraer la altura de varias rutas posibles en la respuesta v4
-    const currentBlock = blockData.height ?? blockData.data?.height ?? blockData.block?.height ?? blockData.number;
+    const data = await res.json();
     
-    if (typeof currentBlock !== 'number') {
-      console.error(`[CHECK-DEPOSITS] Respuesta de /block/current inesperada:`, JSON.stringify(blockData));
-      throw new Error('No se pudo obtener la altura del bloque actual');
-    }
-
-    console.log(`[CHECK-DEPOSITS] Altura actual: ${currentBlock}`);
-
-    // 2. Obtener el historial de transacciones (solo para cadenas UTXO)
-    if (!UTXO_CHAINS.includes(chain)) {
-      console.log(`[CHECK-DEPOSITS] Omitiendo ${chain} (no es UTXO)`);
-      return NextResponse.json({ deposits: [], balance: '0', currentBlockHeight: currentBlock });
-    }
-
-    console.log(`[CHECK-DEPOSITS] Obteniendo transacciones de ${address} (v4)...`);
-    const txUrl = new URL('https://api.tatum.io/v4/data/blockchains/transaction/history/utxos');
-    txUrl.searchParams.append('chain', chain);
-    txUrl.searchParams.append('address', address);
-    txUrl.searchParams.append('pageSize', '50');
-    // Filtramos solo transacciones entrantes para mayor eficiencia
-    txUrl.searchParams.append('txType', 'incoming');
-
-    const txRes = await fetch(txUrl.toString(), {
-      headers: { 'x-api-key': apiKey },
-    });
-
-    // Si no hay transacciones, Tatum devuelve 404
-    if (txRes.status === 404) {
-      console.log(`[CHECK-DEPOSITS] Dirección sin transacciones.`);
-      return NextResponse.json({ deposits: [], balance: '0', currentBlockHeight: currentBlock });
-    }
-
-    if (!txRes.ok) {
-      const errText = await txRes.text();
-      console.error(`[CHECK-DEPOSITS] Error en /transaction/history/utxos: ${txRes.status} - ${errText}`);
-      throw new Error(`Error Tatum (txs): ${txRes.status}`);
-    }
-
-    const txData = await txRes.json();
-    // La respuesta v4 suele venir en `data` como un array de transacciones
-    const transactions = Array.isArray(txData) ? txData : (txData.data || []);
-
-    if (transactions.length === 0) {
-      console.log(`[CHECK-DEPOSITS] No se encontraron transacciones.`);
-      return NextResponse.json({ deposits: [], balance: '0', currentBlockHeight: currentBlock });
-    }
-
-    console.log(`[CHECK-DEPOSITS] Transacciones encontradas: ${transactions.length}`);
-
-    // 3. Procesar las transacciones
-    const deposits = [];
-    let totalConfirmedBalance = 0;
-
-    for (const tx of transactions) {
-      // En v4, el valor puede estar en `value` o `amount` (en la unidad mínima)
-      const value = parseFloat(tx.value || tx.amount || 0);
-      if (value <= 0) continue; // Ignorar si no hay valor positivo
-
-      // Altura del bloque donde se incluyó la transacción
-      const txBlock = tx.blockNumber || tx.blockHeight || 0;
-      let confirmations = 0;
-      if (txBlock > 0) {
-        confirmations = currentBlock - txBlock + 1;
-      }
-
-      const status = confirmations >= 1 ? 'confirmed' : 'pending';
-      const amount = (value / 1e8).toFixed(8); // Litecoin tiene 8 decimales
-
-      if (status === 'confirmed') {
-        totalConfirmedBalance += value / 1e8;
-      }
-
-      deposits.push({
-        symbol: upperSymbol,
-        amount,
-        hash: tx.hash || tx.txId,
-        status,
-        confirmations,
-        timestamp: tx.timestamp ? tx.timestamp * 1000 : (tx.time ? tx.time * 1000 : Date.now()),
+    // Verificar que la respuesta tenga la estructura esperada
+    const addressData = data.data?.[address];
+    if (!addressData) {
+      console.warn(`⚠️ Dirección no encontrada en Blockchair: ${address}`);
+      return NextResponse.json({ 
+        deposits: [], 
+        balance: '0',
+        message: 'Dirección sin actividad en la blockchain' 
       });
     }
 
-    // Ordenar por fecha descendente
-    deposits.sort((a, b) => b.timestamp - a.timestamp);
+    console.log(`✅ Respuesta recibida. Altura actual: ${data.context?.state}`);
 
-    console.log(`[CHECK-DEPOSITS] Depósitos procesados: ${deposits.length} | Saldo confirmado: ${totalConfirmedBalance.toFixed(8)} ${upperSymbol}`);
+    // Obtener saldo y decimales
+    const balanceRaw = addressData.address?.balance || '0';
+    const decimals = (chain === 'ethereum' || chain === 'polygon') ? 18 : 8;
+    const balance = (parseFloat(balanceRaw) / Math.pow(10, decimals)).toFixed(8);
+
+    // Altura actual de la blockchain para calcular confirmaciones
+    const currentBlockHeight = data.context?.state;
+    if (typeof currentBlockHeight !== 'number') {
+      throw new Error('No se pudo obtener la altura de la blockchain');
+    }
+
+    // Procesar transacciones
+    const rawTxs = addressData.transactions || [];
+    console.log(`📋 Transacciones encontradas: ${rawTxs.length}`);
+
+    // Filtrar y procesar SOLO las transacciones entrantes (balance_change positivo)
+    const deposits = rawTxs
+      .filter((tx: any) => {
+        const change = parseFloat(tx.balance_change || '0');
+        // Solo transacciones que aumentaron el saldo (ingresos)
+        return change > 0;
+      })
+      .map((tx: any) => {
+        const blockId = tx.block_id;
+        let confirmations = 0;
+
+        if (typeof blockId === 'number' && blockId > 0) {
+          confirmations = currentBlockHeight - blockId + 1;
+        }
+
+        const status = confirmations >= 1 ? 'confirmed' : 'pending';
+        const valueRaw = parseFloat(tx.balance_change || '0');
+        const amount = (valueRaw / Math.pow(10, decimals)).toFixed(8);
+
+        return {
+          symbol: upperSymbol,
+          amount: amount,
+          hash: tx.hash,
+          status,
+          confirmations,
+          timestamp: tx.time ? new Date(tx.time).getTime() : Date.now(),
+        };
+      })
+      .sort((a: any, b: any) => b.timestamp - a.timestamp);
+
+    console.log(`💰 Depósitos procesados: ${deposits.length}`);
+    deposits.forEach((d: any) => {
+      console.log(`  → ${d.amount} ${d.symbol} | Confirmaciones: ${d.confirmations} | ${d.status} | Hash: ${d.hash.substring(0, 16)}...`);
+    });
+
+    const duration = Date.now() - startTime;
+    console.log(`⏱️ Completado en ${duration}ms\n`);
 
     return NextResponse.json({
       deposits,
-      balance: totalConfirmedBalance.toFixed(8),
-      currentBlockHeight: currentBlock,
+      balance,
+      currentBlockHeight,
     });
 
   } catch (error: any) {
-    console.error('🔥 [ERROR CRÍTICO] en check-deposits (v4):', error.message);
+    console.error('🔥 [Error Crítico] en check-deposits:', error.message);
     return NextResponse.json(
       { error: error.message || 'Error interno verificando depósitos' },
       { status: 500 }
