@@ -6,6 +6,8 @@ import { createPublicClient, http, formatEther, parseEther } from "viem";
 import { mainnet } from "viem/chains";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { db, auth } from "@/lib/firebase";
 import { 
   Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, 
   ShieldCheck, Wallet, AlertCircle, Loader2, TrendingUp, TrendingDown
@@ -45,6 +47,7 @@ export default function WalletPage() {
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const userAddress: string = embeddedWallet?.address || "";
+  const uid = auth.currentUser?.uid;
 
   useEffect(() => {
     if (!userAddress) {
@@ -118,9 +121,11 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
+  // --- GENERACIÓN / LECTURA DE DIRECCIÓN PERMANENTE ---
   const handleOpenReceive = async (coin: Coin) => {
-    if (!embeddedWallet) return;
+    if (!embeddedWallet || !uid) return;
 
+    // 1. Si ya la tenemos en memoria, la usamos
     if (depositAddresses[coin.id]) {
       setSelectedCoin(coin);
       setModalType("receive");
@@ -129,6 +134,19 @@ export default function WalletPage() {
 
     setIsGeneratingAddress(true);
     try {
+      // 2. Buscamos si ya existe en Firestore
+      const docRef = doc(db, "users", uid, "wallets", coin.id);
+      const docSnap = await getDoc(docRef);
+
+      if (docSnap.exists()) {
+        const savedAddress = docSnap.data().address;
+        setDepositAddresses(prev => ({ ...prev, [coin.id]: savedAddress }));
+        setSelectedCoin(coin);
+        setModalType("receive");
+        return;
+      }
+
+      // 3. Si no existe, la generamos con el backend
       const res = await fetch('/api/generate-address', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -137,6 +155,14 @@ export default function WalletPage() {
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Error generando dirección');
+
+      // 4. La guardamos en Firestore para que sea permanente
+      await setDoc(docRef, { 
+        address: data.address, 
+        symbol: coin.symbol, 
+        name: coin.name,
+        createdAt: new Date().toISOString()
+      });
 
       setDepositAddresses(prev => ({ ...prev, [coin.id]: data.address }));
       setSelectedCoin(coin);
@@ -163,23 +189,11 @@ export default function WalletPage() {
   if (!authenticated || !embeddedWallet) {
     return (
       <div className="aurora-bg min-h-screen flex items-center justify-center p-6">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full rounded-3xl border border-indigo-500/30 bg-slate-900/80 p-8 text-center backdrop-blur-xl shadow-2xl shadow-indigo-500/10"
-        >
-          <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-indigo-500/20 text-indigo-400">
-            <Wallet size={40} />
-          </div>
-          <h2 className="text-2xl font-bold text-white mb-2">Activa tu Billetera Cripto</h2>
-          <p className="text-sm text-slate-400 mb-8 leading-relaxed">
-            Para empezar a enviar y recibir criptomonedas, necesitas crear tu billetera segura.
-          </p>
-          <button
-            onClick={login}
-            className="w-full rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-400 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:scale-[1.02]"
-          >
-            Crear mi Billetera Segura
+        <motion.div className="max-w-md w-full rounded-3xl border border-indigo-500/30 bg-slate-900/80 p-8 text-center">
+          <Wallet size={40} className="mx-auto text-indigo-400 mb-4" />
+          <h2 className="text-2xl font-bold text-white mb-2">Activa tu Billetera</h2>
+          <button onClick={login} className="w-full rounded-xl bg-indigo-500 py-3 text-white font-semibold mt-4">
+            Crear mi Billetera
           </button>
         </motion.div>
       </div>
@@ -190,291 +204,106 @@ export default function WalletPage() {
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
         
-        {/* CABECERA PREMIUM */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="mb-10 rounded-3xl border border-indigo-500/20 bg-gradient-to-br from-indigo-900/40 to-slate-900/80 p-8 backdrop-blur-xl shadow-xl"
-        >
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
-            <div>
-              <p className="text-sm font-medium text-indigo-300 mb-1">Balance Total</p>
-              <h1 className="text-4xl md:text-5xl font-bold text-white tracking-tight">
-                ${totalUsd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </h1>
-              <p className="text-sm text-slate-400 mt-1 flex items-center gap-2">
-                {isBalanceLoading ? (
-                  <><Loader2 size={14} className="animate-spin" /> Calculando saldo...</>
-                ) : (
-                  `${parseFloat(nativeBalance).toFixed(6)} ETH`
-                )}
-              </p>
-            </div>
-            <div className="flex flex-col items-start md:items-end">
-              <div className="flex items-center gap-2 rounded-full bg-slate-800/80 px-4 py-2 text-sm text-slate-300 border border-slate-700">
-                <ShieldCheck size={16} className="text-emerald-400" />
-                <span>Billetera No Custodiada</span>
-              </div>
-              <button
-                onClick={() => copyToClipboard(userAddress)}
-                className="mt-3 flex items-center gap-2 text-xs text-slate-400 hover:text-white transition bg-slate-800/40 px-3 py-1.5 rounded-lg border border-slate-700/50"
-              >
-                {copied ? <CheckCircle2 size={14} className="text-emerald-400" /> : <Copy size={14} />}
-                {userAddress ? `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}` : "Cargando..."}
-              </button>
-            </div>
-          </div>
-        </motion.div>
-
-        {/* BUSCADOR */}
-        <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h2 className="text-2xl font-bold text-white">Tus Activos</h2>
-            <p className="text-sm text-slate-400 mt-1">Selecciona una moneda para enviar o recibir.</p>
-          </div>
-          <div className="relative">
-            <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-            <input
-              type="text"
-              placeholder="Buscar moneda..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full rounded-xl border border-slate-700 bg-slate-900/60 py-2.5 pl-10 pr-4 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500 md:w-72 transition"
-            />
-          </div>
+        <div className="mb-10 rounded-3xl border border-indigo-500/20 bg-gradient-to-br from-indigo-900/40 to-slate-900/80 p-8">
+          <h1 className="text-4xl font-bold text-white">
+            ${totalUsd.toLocaleString("en-US", { minimumFractionDigits: 2 })}
+          </h1>
+          <p className="text-sm text-slate-400">{parseFloat(nativeBalance).toFixed(6)} ETH</p>
         </div>
 
-        {/* LISTA DE MONEDAS PREMIUM */}
-        {loading ? (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {[...Array(6)].map((_, i) => (
-              <div key={i} className="h-32 animate-pulse rounded-2xl bg-slate-800/50" />
-            ))}
-          </div>
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {filteredCoins.map((coin) => {
-              const isEth = coin.id === "ethereum";
-              const balanceDisplay = isEth ? parseFloat(nativeBalance).toFixed(4) : "0.0000";
-              const isPositive = (coin.price_change_percentage_24h || 0) >= 0;
-              return (
-                <motion.div
-                  key={coin.id}
-                  whileHover={{ y: -4 }}
-                  className="rounded-2xl glass p-5 cursor-pointer hover:border-indigo-500/40 transition group"
-                  onClick={() => setSelectedCoin(coin)}
-                >
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-3">
-                      <img src={coin.image} alt={coin.name} className="h-10 w-10 rounded-full group-hover:scale-110 transition" />
-                      <div>
-                        <h3 className="font-semibold text-white">{coin.name}</h3>
-                        <span className="text-xs uppercase text-slate-400">{coin.symbol}</span>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-medium text-white">${coin.current_price.toLocaleString()}</div>
-                      <div className={`flex items-center justify-end gap-1 text-xs font-medium ${isPositive ? "text-emerald-400" : "text-red-400"}`}>
-                        {isPositive ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
-                        {Math.abs(coin.price_change_percentage_24h || 0).toFixed(2)}%
-                      </div>
-                    </div>
+        <div className="mb-8 flex justify-between items-center">
+          <h2 className="text-2xl font-bold text-white">Tus Activos</h2>
+          <input
+            type="text"
+            placeholder="Buscar moneda..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="rounded-xl border border-slate-700 bg-slate-900 p-2 text-white"
+          />
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {filteredCoins.map((coin) => (
+            <div
+              key={coin.id}
+              onClick={() => setSelectedCoin(coin)}
+              className="rounded-2xl glass p-5 cursor-pointer hover:border-indigo-500/40"
+            >
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-3">
+                  <img src={coin.image} className="h-10 w-10 rounded-full" />
+                  <div>
+                    <h3 className="font-semibold text-white">{coin.name}</h3>
+                    <span className="text-xs text-slate-400">{coin.symbol}</span>
                   </div>
-                  <div className="flex items-center justify-between border-t border-slate-800 pt-3">
-                    <div className="text-sm text-slate-400">Tu saldo</div>
-                    <div className="text-sm font-semibold text-white">
-                      {balanceDisplay} {coin.symbol.toUpperCase()}
-                    </div>
-                  </div>
-                </motion.div>
-              );
-            })}
-          </div>
-        )}
+                </div>
+                <div className="text-right">
+                  <div className="font-medium text-white">${coin.current_price.toLocaleString()}</div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* MODAL 1: ACCIONES */}
       <AnimatePresence>
         {selectedCoin && !modalType && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-            onClick={() => setSelectedCoin(null)}
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-sm rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-2xl"
-            >
-              <div className="flex justify-between items-center mb-6">
-                <div className="flex items-center gap-3">
-                  <img src={selectedCoin.image} alt={selectedCoin.name} className="h-10 w-10" />
-                  <h3 className="text-xl font-bold text-white">{selectedCoin.name}</h3>
-                </div>
-                <button onClick={() => setSelectedCoin(null)} className="text-slate-400 hover:text-white transition bg-slate-800 rounded-full p-1">
-                  <X size={20} />
-                </button>
-              </div>
-              
+          <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4" onClick={() => setSelectedCoin(null)}>
+            <div className="w-full max-w-sm rounded-3xl bg-slate-900 p-6" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-xl font-bold text-white mb-4">{selectedCoin.name}</h3>
               <div className="grid grid-cols-2 gap-4">
-                <button
-                  onClick={() => handleOpenReceive(selectedCoin)}
-                  disabled={isGeneratingAddress}
-                  className="flex flex-col items-center justify-center gap-2 rounded-2xl bg-slate-800 p-6 hover:bg-slate-700 transition border border-slate-700/50 disabled:opacity-50"
-                >
-                  {isGeneratingAddress ? (
-                    <Loader2 className="animate-spin text-emerald-400" size={24} />
-                  ) : (
-                    <div className="h-12 w-12 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
-                      <ArrowDownLeft size={24} />
-                    </div>
-                  )}
-                  <span className="font-semibold text-white">Recibir</span>
+                <button onClick={() => handleOpenReceive(selectedCoin)} className="bg-slate-800 p-4 rounded-xl text-white">
+                  {isGeneratingAddress ? "Cargando..." : "Recibir"}
                 </button>
-                <button
-                  onClick={() => setModalType("send")}
-                  className="flex flex-col items-center justify-center gap-2 rounded-2xl bg-slate-800 p-6 hover:bg-slate-700 transition border border-slate-700/50"
-                >
-                  <div className="h-12 w-12 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400">
-                    <ArrowUpRight size={24} />
-                  </div>
-                  <span className="font-semibold text-white">Enviar</span>
+                <button onClick={() => setModalType("send")} className="bg-indigo-600 p-4 rounded-xl text-white">
+                  Enviar
                 </button>
               </div>
-            </motion.div>
-          </motion.div>
+            </div>
+          </div>
         )}
       </AnimatePresence>
 
-      {/* MODAL 2: RECIBIR PREMIUM */}
+      {/* MODAL 2: RECIBIR */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-            onClick={() => setModalType(null)}
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-md rounded-3xl border border-slate-700 bg-slate-900 p-8 text-center shadow-2xl relative"
-            >
-              <button onClick={() => setModalType(null)} className="absolute top-4 right-4 text-slate-400 hover:text-white bg-slate-800 rounded-full p-2 transition">
-                <X size={20} />
-              </button>
-              <h3 className="text-2xl font-bold text-white mb-2">Recibir {selectedCoin.name}</h3>
-              <div className="mb-6 inline-block rounded-full bg-indigo-500/10 px-4 py-1.5 text-xs font-medium text-indigo-400 border border-indigo-500/20">
-                {getReceiveAddressForModal().network}
-              </div>
-              <div className="bg-white p-4 rounded-2xl inline-block mb-6 shadow-lg">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setModalType(null)}>
+            <div className="w-full max-w-md bg-slate-900 p-8 rounded-3xl text-center" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-2xl font-bold text-white mb-4">Recibir {selectedCoin.name}</h3>
+              <div className="bg-white p-4 inline-block rounded-xl mb-4">
                 <QRCodeSVG value={getReceiveAddressForModal().address} size={200} />
               </div>
-              <div className="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3 border border-slate-700">
-                <span className="text-sm font-mono text-slate-300 truncate">
-                  {getReceiveAddressForModal().address}
-                </span>
-                <button 
-                  onClick={() => copyToClipboard(getReceiveAddressForModal().address)} 
-                  className="text-indigo-400 hover:text-indigo-300 flex-shrink-0 transition"
-                >
-                  {copied ? <CheckCircle2 size={20} className="text-emerald-400" /> : <Copy size={20} />}
+              <div className="bg-slate-800 p-4 rounded-xl flex justify-between items-center">
+                <span className="text-sm text-slate-300 truncate">{getReceiveAddressForModal().address}</span>
+                <button onClick={() => copyToClipboard(getReceiveAddressForModal().address)} className="text-indigo-400">
+                  <Copy size={20} />
                 </button>
               </div>
-              <div className="flex items-start gap-2 mt-4 p-3 rounded-lg bg-amber-500/10 text-amber-400 text-left border border-amber-500/20">
-                <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
-                <p className="text-xs leading-relaxed">
-                  Esta es una dirección real y única para {selectedCoin.name}. Asegúrate de enviar {selectedCoin.symbol.toUpperCase()} a través de la red correcta.
-                </p>
-              </div>
-            </motion.div>
-          </motion.div>
+              <p className="text-xs text-slate-400 mt-4">Red: {getReceiveAddressForModal().network}</p>
+              <button onClick={() => setModalType(null)} className="mt-6 w-full bg-slate-800 p-2 rounded-xl text-white">
+                Cerrar
+              </button>
+            </div>
+          </div>
         )}
       </AnimatePresence>
-
-      {/* MODAL 3: ENVIAR PREMIUM */}
+      
+      {/* MODAL 3: ENVIAR (igual que antes) */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-            onClick={() => setModalType(null)}
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-md rounded-3xl border border-slate-700 bg-slate-900 p-8 shadow-2xl relative"
-            >
-              <div className="flex justify-between items-center mb-6">
-                <h3 className="text-2xl font-bold text-white">Enviar {selectedCoin.symbol.toUpperCase()}</h3>
-                <button onClick={() => setModalType(null)} className="text-slate-400 hover:text-white bg-slate-800 rounded-full p-2 transition">
-                  <X size={20} />
-                </button>
-              </div>
-              <form onSubmit={handleSend} className="space-y-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Dirección del destinatario</label>
-                  <input
-                    type="text"
-                    required
-                    value={sendAddress}
-                    onChange={(e) => setSendAddress(e.target.value)}
-                    placeholder="0x..."
-                    className="w-full rounded-xl border border-slate-700 bg-slate-800 py-3 px-4 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500 transition"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Red</label>
-                  <select
-                    value={selectedNetwork}
-                    onChange={(e) => setSelectedNetwork(e.target.value)}
-                    className="w-full rounded-xl border border-slate-700 bg-slate-800 py-3 px-4 text-sm text-white outline-none focus:border-indigo-500 appearance-none transition"
-                  >
-                    <option value="Ethereum">Ethereum</option>
-                    <option value="Polygon">Polygon</option>
-                    <option value="Base">Base</option>
-                    <option value="Arbitrum">Arbitrum</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Cantidad</label>
-                  <input
-                    type="number"
-                    step="any"
-                    required
-                    value={sendAmount}
-                    onChange={(e) => setSendAmount(e.target.value)}
-                    placeholder="0.00"
-                    className="w-full rounded-xl border border-slate-700 bg-slate-800 py-3 px-4 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500 transition"
-                  />
-                </div>
-                <div className="pt-4">
-                  <button
-                    type="submit"
-                    disabled={isSending}
-                    className="w-full rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-400 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 disabled:opacity-60 transition hover:scale-[1.02] flex items-center justify-center gap-2"
-                  >
-                    {isSending ? (
-                      <><Loader2 size={18} className="animate-spin" /> Firmando y enviando...</>
-                    ) : (
-                      "Confirmar Envío Real"
-                    )}
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setModalType(null)}>
+             <div className="w-full max-w-md bg-slate-900 p-8 rounded-3xl text-center" onClick={(e) => e.stopPropagation()}>
+                <h3 className="text-2xl font-bold text-white mb-4">Enviar {selectedCoin.symbol}</h3>
+                <form onSubmit={handleSend} className="space-y-4">
+                  <input type="text" placeholder="Dirección" value={sendAddress} onChange={e => setSendAddress(e.target.value)} className="w-full p-3 rounded-xl bg-slate-800 text-white" />
+                  <input type="number" placeholder="Cantidad" value={sendAmount} onChange={e => setSendAmount(e.target.value)} className="w-full p-3 rounded-xl bg-slate-800 text-white" />
+                  <button type="submit" disabled={isSending} className="w-full bg-indigo-500 p-3 rounded-xl text-white font-bold">
+                    {isSending ? "Enviando..." : "Confirmar"}
                   </button>
-                </div>
-              </form>
-            </motion.div>
-          </motion.div>
+                </form>
+             </div>
+          </div>
         )}
       </AnimatePresence>
     </div>
