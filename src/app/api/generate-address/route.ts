@@ -8,21 +8,19 @@ const NATIVE_CHAINS: Record<string, string> = {
   ALGO: 'algorand', NEAR: 'near', ATOM: 'cosmos', FLOW: 'flow', EOS: 'eos',
 };
 
-// Función para generar un índice determinista a partir de userId + symbol
 function getDeterministicIndex(userId: string, symbol: string): number {
   const hash = `${userId}-${symbol}`;
   let index = 0;
   for (let i = 0; i < hash.length; i++) {
     index = ((index << 5) - index) + hash.charCodeAt(i);
-    index |= 0; // Convertir a entero de 32 bits
+    index |= 0;
   }
-  // Asegurar que sea positivo y dentro del rango de Tatum (máx 2^31-1)
   return Math.abs(index) % 2147483647;
 }
 
 export async function POST(request: Request) {
   try {
-    const { symbol, userId } = await request.json();
+    const { symbol, userId, xpub: existingXpub } = await request.json();
     const upperSymbol = symbol?.toUpperCase();
     
     if (!upperSymbol || !userId) {
@@ -30,24 +28,25 @@ export async function POST(request: Request) {
     }
 
     const chain = NATIVE_CHAINS[upperSymbol] || 'ethereum';
+    let xpub = existingXpub;
 
-    const walletRes = await fetch(`https://api.tatum.io/v3/${chain}/wallet`, {
-      method: 'GET',
-      headers: { 'x-api-key': process.env.TATUM_API_KEY! },
-    });
-
-    if (!walletRes.ok) {
-      const err = await walletRes.text();
-      throw new Error(`Tatum wallet error: ${walletRes.status} - ${err}`);
+    // Si no tenemos una xpub guardada, generamos una nueva
+    if (!xpub) {
+      const walletRes = await fetch(`https://api.tatum.io/v3/${chain}/wallet`, {
+        method: 'GET',
+        headers: { 'x-api-key': process.env.TATUM_API_KEY! },
+      });
+      if (!walletRes.ok) throw new Error('Error generando wallet en Tatum');
+      const walletData = await walletRes.json();
+      xpub = walletData.xpub;
     }
-    const walletData = await walletRes.json();
 
-    if (walletData.xpub) {
-      // Índice determinista: mismo usuario + misma moneda = misma dirección
+    if (xpub) {
+      // Derivamos la dirección usando el índice determinista
       const index = getDeterministicIndex(userId, upperSymbol);
 
       const addressRes = await fetch(
-        `https://api.tatum.io/v3/${chain}/address/${walletData.xpub}/${index}`,
+        `https://api.tatum.io/v3/${chain}/address/${xpub}/${index}`,
         {
           method: 'GET',
           headers: { 'x-api-key': process.env.TATUM_API_KEY! },
@@ -59,14 +58,10 @@ export async function POST(request: Request) {
         throw new Error(`Tatum address error: ${addressRes.status} - ${err}`);
       }
       const { address } = await addressRes.json();
-      return NextResponse.json({ address });
-
-    } else if (walletData.address) {
-      return NextResponse.json({ address: walletData.address });
-    } else {
-      throw new Error('Tatum no devolvió dirección');
+      return NextResponse.json({ address, xpub }); // Devolvemos la xpub
     }
 
+    throw new Error('Tatum no devolvió una xpub válida');
   } catch (error: any) {
     console.error('Error en API Tatum:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });
