@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 
-// Mapeo de símbolos a cadenas de Tatum (v4 usa nombres como "litecoin-mainnet")
 const CHAIN_MAP: Record<string, string> = {
   BTC: 'bitcoin-mainnet',
   LTC: 'litecoin-mainnet',
@@ -11,11 +10,33 @@ const CHAIN_MAP: Record<string, string> = {
   BSC: 'bsc',
   SOL: 'solana',
   ADA: 'cardano-mainnet',
-  // Añade más según necesites
 };
 
-// Cadenas que usan el endpoint UTXO v4
 const UTXO_CHAINS = ['bitcoin-mainnet', 'litecoin-mainnet', 'doge-mainnet', 'bitcoin-cash-mainnet', 'cardano-mainnet'];
+
+// Función para formatear el valor según la moneda
+function formatValue(value: string | number, chain: string): string {
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  if (isNaN(num)) return '0';
+  
+  // UTXO chains usan 8 decimales (satoshis, litoshis, etc.)
+  if (UTXO_CHAINS.includes(chain)) {
+    return (num / 1e8).toFixed(8);
+  }
+  // EVM chains usan 18 decimales (wei)
+  if (chain === 'ethereum' || chain === 'polygon' || chain === 'bsc') {
+    return (num / 1e18).toFixed(6);
+  }
+  // Solana usa 9 decimales (lamports)
+  if (chain === 'solana') {
+    return (num / 1e9).toFixed(6);
+  }
+  // Cardano usa 6 decimales
+  if (chain === 'cardano-mainnet') {
+    return (num / 1e6).toFixed(6);
+  }
+  return num.toString();
+}
 
 export async function POST(request: Request) {
   try {
@@ -25,7 +46,7 @@ export async function POST(request: Request) {
     }
 
     const upperSymbol = symbol.toUpperCase();
-    const chain = CHAIN_MAP[upperSymbol] || 'ethereum'; // Fallback a Ethereum para tokens
+    const chain = CHAIN_MAP[upperSymbol] || 'ethereum';
 
     let deposits: any[] = [];
 
@@ -36,7 +57,7 @@ export async function POST(request: Request) {
       url.searchParams.append('address', address);
       url.searchParams.append('pageSize', '50');
       url.searchParams.append('offset', '0');
-      url.searchParams.append('txType', 'incoming'); // Solo transacciones entrantes
+      url.searchParams.append('txType', 'incoming');
 
       const res = await fetch(url.toString(), {
         headers: { 'x-api-key': process.env.TATUM_API_KEY! },
@@ -44,15 +65,33 @@ export async function POST(request: Request) {
 
       if (res.ok) {
         const data = await res.json();
-        // La respuesta v4 suele ser un array de transacciones
-        deposits = (Array.isArray(data) ? data : data.data || []).map((tx: any) => ({
-          symbol: upperSymbol,
-          amount: tx.value || tx.amount || '0',
-          hash: tx.hash || tx.txId,
-          status: tx.confirmations > 0 ? 'confirmed' : 'pending',
-          confirmations: tx.confirmations || 0,
-          timestamp: tx.timestamp ? tx.timestamp * 1000 : Date.now(),
-        }));
+        deposits = (Array.isArray(data) ? data : data.data || []).map((tx: any) => {
+          const confirmations = tx.confirmations || 0;
+          // Consideramos confirmado si tiene al menos 1 confirmación (o 3 para más seguridad)
+          const status = confirmations >= 1 ? 'confirmed' : 'pending';
+          
+          // Calcular el valor total recibido en esta dirección
+          // Para UTXO, el valor puede estar en los outputs
+          let totalValue = 0;
+          if (tx.outputs && Array.isArray(tx.outputs)) {
+            tx.outputs.forEach((out: any) => {
+              if (out.address === address) {
+                totalValue += parseFloat(out.value || 0);
+              }
+            });
+          } else {
+            totalValue = parseFloat(tx.value || 0);
+          }
+
+          return {
+            symbol: upperSymbol,
+            amount: formatValue(totalValue, chain),
+            hash: tx.hash || tx.txId,
+            status,
+            confirmations,
+            timestamp: tx.timestamp ? tx.timestamp * 1000 : Date.now(),
+          };
+        });
       } else {
         const errorBody = await res.text();
         console.error(`Error UTXO v4 para ${chain}:`, errorBody);
@@ -70,14 +109,19 @@ export async function POST(request: Request) {
 
       if (res.ok) {
         const data = await res.json();
-        deposits = (data.data || []).map((tx: any) => ({
-          symbol: upperSymbol,
-          amount: tx.amount || tx.value || '0',
-          hash: tx.hash,
-          status: tx.confirmations > 0 ? 'confirmed' : 'pending',
-          confirmations: tx.confirmations || 0,
-          timestamp: tx.timestamp ? tx.timestamp * 1000 : Date.now(),
-        }));
+        deposits = (data.data || []).map((tx: any) => {
+          const confirmations = tx.confirmations || 0;
+          const status = confirmations >= 1 ? 'confirmed' : 'pending';
+          
+          return {
+            symbol: upperSymbol,
+            amount: formatValue(tx.amount || tx.value || 0, chain),
+            hash: tx.hash,
+            status,
+            confirmations,
+            timestamp: tx.timestamp ? tx.timestamp * 1000 : Date.now(),
+          };
+        });
       }
     }
 
