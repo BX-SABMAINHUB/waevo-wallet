@@ -1,136 +1,90 @@
 import { NextResponse } from 'next/server';
 
-// Mapeo de símbolos a los identificadores de cadena de Blockchair
-const BLOCKCHAIR_CHAIN_MAP: Record<string, string> = {
-  BTC: 'bitcoin',
-  LTC: 'litecoin',
-  DOGE: 'dogecoin',
-  BCH: 'bitcoin-cash',
-  ETH: 'ethereum',
-  MATIC: 'polygon',
-  DASH: 'dash',
-  XRP: 'ripple',
-  XLM: 'stellar',
-  ZEC: 'zcash',
+// Mapeo de símbolos a los paths de la API legacy de Blockchain.com
+const BLOCKCHAIN_INFO_PATHS: Record<string, string> = {
+  BTC: 'btc',
+  LTC: 'ltc',
+  BCH: 'bch',
+  // Otros como ETH, SOL, etc., usan la API moderna, no este endpoint legacy.
 };
 
 export async function POST(request: Request) {
-  const startTime = Date.now();
-  
   try {
-    const body = await request.json();
-    const { symbol, address } = body;
-
-    console.log(`\n=== [CHECK-DEPOSITS] Verificando ${symbol} en ${address} ===`);
-
+    const { symbol, address } = await request.json();
     if (!symbol || !address) {
       return NextResponse.json({ error: 'Faltan símbolo o dirección' }, { status: 400 });
     }
 
     const upperSymbol = symbol.toUpperCase();
-    const chain = BLOCKCHAIR_CHAIN_MAP[upperSymbol];
+    const path = BLOCKCHAIN_INFO_PATHS[upperSymbol];
 
-    if (!chain) {
-      console.error(`❌ Red no soportada en Blockchair: ${upperSymbol}`);
+    if (!path) {
       return NextResponse.json(
-        { error: `Red ${upperSymbol} no soportada por Blockchair` },
+        { error: `Blockchain.com (legacy) no soporta ${upperSymbol}` },
         { status: 400 }
       );
     }
 
-    // 🔴 CRÍTICO: transaction_details=true es OBLIGATORIO para obtener los objetos de transacción
-    const url = new URL(`https://api.blockchair.com/${chain}/dashboards/address/${address}`);
-    url.searchParams.append('transaction_details', 'true');
-    url.searchParams.append('limit', '20');
+    // 1. Obtener la altura actual del último bloque de la red
+    const blockRes = await fetch(`https://blockchain.info/${path}/latestblock?format=json`);
+    if (!blockRes.ok) throw new Error('No se pudo obtener la altura del bloque');
+    const blockData = await blockRes.json();
+    const currentBlockHeight = blockData.height;
+    if (typeof currentBlockHeight !== 'number') throw new Error('Altura de bloque inválida');
 
-    console.log(`📡 Consultando: ${url.toString()}`);
-
-    const res = await fetch(url.toString(), {
-      headers: { 'Accept': 'application/json' },
-    });
-
-    // Manejo de límite de peticiones
-    if (res.status === 402) {
-      console.error('❌ Límite de peticiones de Blockchair excedido (402)');
-      return NextResponse.json(
-        { error: 'Límite de consultas excedido. Espera un minuto e inténtalo de nuevo.' },
-        { status: 429 }
-      );
+    // 2. Obtener los datos de la dirección (incluye transacciones)
+    const addrRes = await fetch(`https://blockchain.info/${path}/address/${address}?format=json`);
+    if (!addrRes.ok) {
+      if (addrRes.status === 404) {
+        // Dirección sin actividad
+        return NextResponse.json({ deposits: [], balance: '0' });
+      }
+      const errText = await addrRes.text();
+      throw new Error(`Blockchain.com error: ${addrRes.status} - ${errText}`);
     }
+    const addrData = await addrRes.json();
 
-    if (!res.ok) {
-      const errorText = await res.text();
-      console.error(`❌ Blockchair error ${res.status}:`, errorText);
-      throw new Error(`Blockchair respondió ${res.status}: ${errorText.substring(0, 200)}`);
-    }
+    // 3. Calcular el saldo (en la unidad mínima, dividir por 1e8)
+    const balanceRaw = addrData.final_balance || 0;
+    const balance = (balanceRaw / 1e8).toFixed(8);
 
-    const data = await res.json();
-    
-    // Verificar que la respuesta tenga la estructura esperada
-    const addressData = data.data?.[address];
-    if (!addressData) {
-      console.warn(`⚠️ Dirección no encontrada en Blockchair: ${address}`);
-      return NextResponse.json({ 
-        deposits: [], 
-        balance: '0',
-        message: 'Dirección sin actividad en la blockchain' 
-      });
-    }
-
-    console.log(`✅ Respuesta de Blockchair recibida. Altura actual: ${data.context?.state}`);
-
-    // Obtener saldo y decimales
-    const balanceRaw = addressData.address?.balance || '0';
-    const decimals = (chain === 'ethereum' || chain === 'polygon') ? 18 : 8;
-    const balance = (parseFloat(balanceRaw) / Math.pow(10, decimals)).toFixed(8);
-
-    // Altura actual de la blockchain para calcular confirmaciones
-    const currentBlockHeight = data.context?.state;
-    if (typeof currentBlockHeight !== 'number') {
-      throw new Error('No se pudo obtener la altura de la blockchain');
-    }
-
-    // Procesar transacciones
-    const rawTxs = addressData.transactions || [];
-    console.log(`📋 Transacciones encontradas: ${rawTxs.length}`);
-
-    // Filtrar y procesar SOLO las transacciones entrantes (balance_change positivo)
-    const deposits = rawTxs
+    // 4. Procesar transacciones (solo entrantes)
+    const transactions = addrData.txs || [];
+    const deposits = transactions
       .filter((tx: any) => {
-        const change = parseFloat(tx.balance_change || '0');
-        // Solo transacciones que aumentaron el saldo (ingresos)
-        return change > 0;
+        // Comprobar si la dirección está en los outputs (entrante)
+        const isIncoming = tx.out?.some((out: any) => out.addr === address);
+        // Ignorar coinbase (minería) para evitar falsos positivos
+        const isCoinbase = tx.inputs?.some((inp: any) => inp.prev_out?.addr === undefined);
+        return isIncoming && !isCoinbase;
       })
       .map((tx: any) => {
-        const blockId = tx.block_id;
+        const blockHeight = tx.block_height;
         let confirmations = 0;
-
-        if (typeof blockId === 'number' && blockId > 0) {
-          confirmations = currentBlockHeight - blockId + 1;
+        if (typeof blockHeight === 'number' && blockHeight > 0) {
+          confirmations = currentBlockHeight - blockHeight + 1;
         }
-
         const status = confirmations >= 1 ? 'confirmed' : 'pending';
-        const valueRaw = parseFloat(tx.balance_change || '0');
-        const amount = (valueRaw / Math.pow(10, decimals)).toFixed(8);
+
+        // Calcular el valor total recibido en esta dirección en esta transacción
+        let receivedValue = 0;
+        tx.out?.forEach((out: any) => {
+          if (out.addr === address) {
+            receivedValue += (out.value || 0);
+          }
+        });
+        const amount = (receivedValue / 1e8).toFixed(8);
 
         return {
           symbol: upperSymbol,
-          amount: amount,
+          amount,
           hash: tx.hash,
           status,
           confirmations,
-          timestamp: tx.time ? new Date(tx.time).getTime() : Date.now(),
+          timestamp: tx.time ? tx.time * 1000 : Date.now(),
         };
       })
-      .sort((a: any, b: any) => b.timestamp - a.timestamp);
-
-    console.log(`💰 Depósitos procesados: ${deposits.length}`);
-    deposits.forEach((d: any) => {
-      console.log(`  → ${d.amount} ${d.symbol} | Confirmaciones: ${d.confirmations} | ${d.status} | Hash: ${d.hash.substring(0, 16)}...`);
-    });
-
-    const duration = Date.now() - startTime;
-    console.log(`⏱️ Completado en ${duration}ms\n`);
+      .sort((a: any, b: any) => b.timestamp - a.timestamp); // Más reciente primero
 
     return NextResponse.json({
       deposits,
@@ -139,9 +93,9 @@ export async function POST(request: Request) {
     });
 
   } catch (error: any) {
-    console.error('🔥 [Error Crítico] en check-deposits:', error.message);
+    console.error('🔥 [Error Crítico] en check-deposits (Blockchain.com):', error.message);
     return NextResponse.json(
-      { error: error.message || 'Error interno verificando depósitos' },
+      { error: error.message || 'Error interno verificando depósitos con Blockchain.com' },
       { status: 500 }
     );
   }
