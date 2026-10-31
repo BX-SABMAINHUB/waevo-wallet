@@ -1,11 +1,10 @@
-import { ChartSection } from "@/components/charts/ChartSection";
+import { ChartClientWrapper } from "@/components/charts/ChartClientWrapper";
 
 interface CoinPageProps {
   params: Promise<{ id: string }>;
 }
 
 export default async function CoinPage({ params }: CoinPageProps) {
-  // Await directo porque es un Server Component
   const { id } = await params;
 
   return (
@@ -15,8 +14,7 @@ export default async function CoinPage({ params }: CoinPageProps) {
           {id.replace(/-/g, " ")}
         </h1>
         <div className="rounded-2xl glass p-4 md:p-6">
-          {/* Usamos ChartSection, que es un Client Component */}
-          <ChartSection coinId={id} />
+          <ChartClientWrapper coinId={id} />
         </div>
       </div>
     </div>
