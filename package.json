@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@emailjs/nodejs": "^4.0.0",
-    "@privy-io/react-auth": "^2.0.0",
+    "@privy-io/react-auth": "^2.25.0",
     "firebase": "^11.1.0",
     "firebase-admin": "^13.0.0",
     "lucide-react": "^0.460.0",
