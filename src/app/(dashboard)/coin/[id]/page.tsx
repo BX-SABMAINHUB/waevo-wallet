@@ -1,4 +1,4 @@
-import { ChartClientWrapper } from "@/components/charts/ChartClientWrapper";
+import { HighchartsStockChart } from "@/components/charts/HighchartsStockChart";
 
 interface CoinPageProps {
   params: Promise<{ id: string }>;
@@ -14,7 +14,8 @@ export default async function CoinPage({ params }: CoinPageProps) {
           {id.replace(/-/g, " ")}
         </h1>
         <div className="rounded-2xl glass p-4 md:p-6">
-          <ChartClientWrapper coinId={id} />
+          {/* El componente del gráfico es un Client Component */}
+          <HighchartsStockChart coinId={id} />
         </div>
       </div>
     </div>
