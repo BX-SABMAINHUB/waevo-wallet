@@ -6,21 +6,10 @@ import { createPublicClient, http, formatEther, parseEther } from "viem";
 import { mainnet } from "viem/chains";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
-// @ts-ignore
-import { HDWallet } from "coinlib-sdk/coinlib-hd";
+import { Coinlib } from "coinlib-sdk";
 import { 
-  Search, 
-  ArrowDownLeft, 
-  ArrowUpRight, 
-  X, 
-  Copy, 
-  CheckCircle2, 
-  ShieldCheck, 
-  Wallet,
-  AlertCircle,
-  Loader2,
-  TrendingUp,
-  TrendingDown
+  Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, 
+  ShieldCheck, Wallet, AlertCircle, Loader2, TrendingUp, TrendingDown
 } from "lucide-react";
 
 interface Coin {
@@ -55,13 +44,11 @@ export default function WalletPage() {
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const userAddress: string = embeddedWallet?.address || "";
 
-  // --- CONSULTAR SALDO ON-CHAIN (ETH) ---
   useEffect(() => {
     if (!userAddress) {
       setIsBalanceLoading(false);
       return;
     }
-
     const fetchBalance = async () => {
       setIsBalanceLoading(true);
       try {
@@ -75,11 +62,9 @@ export default function WalletPage() {
         setIsBalanceLoading(false);
       }
     };
-
     fetchBalance();
   }, [userAddress]);
 
-  // --- CARGAR MONEDAS ---
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -103,21 +88,17 @@ export default function WalletPage() {
       coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
-  // --- LÓGICA DE ENVÍO ---
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!embeddedWallet || !selectedCoin) return;
-
     setIsSending(true);
     try {
       const valueInWei = parseEther(sendAmount);
       const { hash } = await sendTransaction({ to: sendAddress, value: valueInWei });
-
       alert(`✅ Transacción enviada.\nHash: ${hash}`);
       setModalType(null);
       setSendAddress("");
       setSendAmount("");
-      
       if (userAddress) {
         const client = createPublicClient({ chain: mainnet, transport: http() });
         const balanceWei = await client.getBalance({ address: userAddress as `0x${string}` });
@@ -142,12 +123,11 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
-  // --- LA MAGIA: DIRECCIÓN DE RECIBIR VÁLIDA PARA TODAS LAS MONEDAS ---
+  // --- NUEVA LÓGICA CON coinlib-sdk v3 ---
   const getReceiveAddress = (coin: Coin) => {
     const symbol = coin.symbol.toUpperCase();
     
-    // 1. Para redes EVM y Solana, usamos la dirección REAL de Privy.
-    //    (Esta es la única que controlas de verdad).
+    // 1. Redes EVM y Solana: usamos la dirección REAL de Privy
     const evmSymbols = ["ETH", "MATIC", "USDT", "USDC", "DAI", "LINK", "UNI", "SHIB", "PEPE", "ARB", "OP", "AVAX", "BNB", "FTM"];
     if (evmSymbols.includes(symbol) || coin.id === "ethereum" || coin.id === "matic-network") {
       return { address: userAddress, network: "Red EVM (Ethereum, Polygon, BSC...)" };
@@ -155,42 +135,34 @@ export default function WalletPage() {
     if (symbol === "SOL" || coin.id === "solana") {
       const solWallet = wallets.find(w => w.chainId?.startsWith('solana'));
       if (solWallet) return { address: solWallet.address, network: "Red Solana" };
-      // Si no hay wallet de Solana en Privy, generamos una válida con coinlib-sdk
     }
 
-    // 2. Para el RESTO de monedas, generamos una dirección VÁLIDA con coinlib-sdk.
-    //    Usamos una semilla derivada de tu dirección de Privy para que sea determinista
-    //    (siempre obtendrás la misma dirección para la misma moneda).
+    // 2. Resto de monedas: usamos coinlib-sdk v3 para generar una dirección VÁLIDA
     try {
       if (!userAddress) return { address: "Esperando dirección...", network: "Cargando" };
 
-      // Creamos una semilla única a partir de tu dirección EVM.
-      // NOTA: Esto es para VISUALIZACIÓN. No controlas la clave privada de estas direcciones.
-      const seed = HDWallet.generate(12, "english"); 
-      // En una app real, deberías derivar de una semilla maestra segura y guardarla.
-      
-      const coinMap: Record<string, string> = {
-        BTC: "BTC", DOGE: "DOGE", ADA: "ADA", XRP: "XRP", LTC: "LTC", 
-        BCH: "BCH", ZEC: "ZEC", DOT: "DOT", TRX: "TRX", XLM: "XLM"
+      // En v3 se usa la clase Coinlib con una semilla
+      const config = {
+        coins: symbol,
+        network: "mainnet",
+        seed: "waevo-wallet-seed-" + userAddress.slice(2, 10), // Semilla determinista
       };
       
-      const coinlibSymbol = coinMap[symbol];
-      if (coinlibSymbol) {
-        const account = seed.deriveAccount(coinlibSymbol, "mainnet");
-        return { 
-          address: account.address, 
-          network: `Red ${coin.name} (${coinlibSymbol})`,
-        };
-      }
+      const coinlib = new Coinlib(config);
+      // La dirección se deriva de forma síncrona en v3
+      const address = coinlib.deriveAddressSync(0); 
+      
+      return { 
+        address: address, 
+        network: `Red ${coin.name} (${symbol})`,
+      };
     } catch (error) {
       console.error(`Error generando dirección para ${coin.name}:`, error);
     }
 
-    // 3. Fallback para monedas no soportadas por coinlib-sdk (ej. monedas muy nuevas).
-    //    Generamos un formato genérico válido para que la UI no se rompa.
-    const prefix = symbol.slice(0, 2).toLowerCase();
+    // 3. Fallback genérico si coinlib-sdk no soporta la moneda
     return { 
-      address: `${prefix}_${userAddress.slice(2, 42)}`, 
+      address: `${symbol.toLowerCase()}_${userAddress.slice(2, 42)}`, 
       network: `Red ${coin.name} (Formato genérico)` 
     };
   };
@@ -235,8 +207,6 @@ export default function WalletPage() {
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
-        
-        {/* CABECERA: SALDO REAL Y DIRECCIÓN */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -272,7 +242,6 @@ export default function WalletPage() {
           </div>
         </motion.div>
 
-        {/* BUSCADOR */}
         <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h2 className="text-2xl font-bold text-white">Tus Activos</h2>
@@ -290,7 +259,6 @@ export default function WalletPage() {
           </div>
         </div>
 
-        {/* LISTA DE MONEDAS */}
         {loading ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[...Array(6)].map((_, i) => (
@@ -303,7 +271,6 @@ export default function WalletPage() {
               const isEth = coin.id === "ethereum";
               const balanceDisplay = isEth ? parseFloat(nativeBalance).toFixed(4) : "0.0000";
               const isPositive = (coin.price_change_percentage_24h || 0) >= 0;
-              
               return (
                 <motion.div
                   key={coin.id}
@@ -340,7 +307,6 @@ export default function WalletPage() {
         )}
       </div>
 
-      {/* MODAL 1: MENÚ DE ACCIONES (ENVIAR / RECIBIR) */}
       <AnimatePresence>
         {selectedCoin && !modalType && (
           <motion.div
@@ -366,7 +332,6 @@ export default function WalletPage() {
                   <X size={20} />
                 </button>
               </div>
-              
               <div className="grid grid-cols-2 gap-4">
                 <button
                   onClick={() => setModalType("receive")}
@@ -392,7 +357,6 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* MODAL 2: RECIBIR (DIRECCIÓN DINÁMICA Y VÁLIDA) */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
           <motion.div
@@ -412,17 +376,13 @@ export default function WalletPage() {
               <button onClick={() => setModalType(null)} className="absolute top-4 right-4 text-slate-400 hover:text-white bg-slate-800 rounded-full p-2 transition">
                 <X size={20} />
               </button>
-              
               <h3 className="text-2xl font-bold text-white mb-2">Recibir {selectedCoin.name}</h3>
-              
               <div className="mb-6 inline-block rounded-full bg-indigo-500/10 px-4 py-1.5 text-xs font-medium text-indigo-400 border border-indigo-500/20">
                 {getReceiveAddress(selectedCoin).network}
               </div>
-
               <div className="bg-white p-4 rounded-2xl inline-block mb-6 shadow-lg">
                 <QRCodeSVG value={getReceiveAddress(selectedCoin).address} size={200} />
               </div>
-              
               <div className="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3 border border-slate-700">
                 <span className="text-sm font-mono text-slate-300 truncate">
                   {getReceiveAddress(selectedCoin).address}
@@ -434,7 +394,6 @@ export default function WalletPage() {
                   {copied ? <CheckCircle2 size={20} className="text-emerald-400" /> : <Copy size={20} />}
                 </button>
               </div>
-              
               <div className="flex items-start gap-2 mt-4 p-3 rounded-lg bg-amber-500/10 text-amber-400 text-left border border-amber-500/20">
                 <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
                 <p className="text-xs leading-relaxed">
@@ -446,7 +405,6 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* MODAL 3: ENVIAR (TRANSACCIÓN REAL) */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <motion.div
@@ -469,7 +427,6 @@ export default function WalletPage() {
                   <X size={20} />
                 </button>
               </div>
-
               <form onSubmit={handleSend} className="space-y-4">
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-1">Dirección del destinatario</label>
@@ -482,7 +439,6 @@ export default function WalletPage() {
                     className="w-full rounded-xl border border-slate-700 bg-slate-800 py-3 px-4 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500 transition"
                   />
                 </div>
-
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-1">Red</label>
                   <select
@@ -496,7 +452,6 @@ export default function WalletPage() {
                     <option value="Arbitrum">Arbitrum</option>
                   </select>
                 </div>
-
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-1">Cantidad</label>
                   <input
@@ -509,7 +464,6 @@ export default function WalletPage() {
                     className="w-full rounded-xl border border-slate-700 bg-slate-800 py-3 px-4 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500 transition"
                   />
                 </div>
-
                 <div className="pt-4">
                   <button
                     type="submit"
