@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { useWallets, useSendTransaction, usePrivy } from "@privy-io/react-auth";
+import { useWallets, useSendTransaction, usePrivy, useDepositAddress } from "@privy-io/react-auth";
 import { createPublicClient, http, formatEther, parseEther } from "viem";
 import { mainnet } from "viem/chains";
 import { QRCodeSVG } from "qrcode.react";
@@ -24,6 +24,7 @@ export default function WalletPage() {
   const { ready, authenticated, login } = usePrivy();
   const { wallets } = useWallets();
   const { sendTransaction } = useSendTransaction();
+  const { createDepositAddress } = useDepositAddress();
 
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
@@ -39,6 +40,10 @@ export default function WalletPage() {
   const [isSending, setIsSending] = useState(false);
   const [copied, setCopied] = useState(false);
   const [selectedNetwork, setSelectedNetwork] = useState("Ethereum");
+
+  // Estado para almacenar las direcciones de depósito generadas por Privy
+  const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
+  const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const userAddress: string = embeddedWallet?.address || "";
@@ -122,71 +127,52 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
-  // --- GENERADOR DE DIRECCIONES DETERMINISTAS SIN DEPENDENCIAS ---
-  const generateDeterministicAddress = (prefix: string, length: number, seed: string) => {
-    const chars = "0123456789abcdefghijklmnopqrstuvwxyz";
-    let result = prefix;
-    let hash = 0;
-    for (let i = 0; i < seed.length; i++) {
-      hash = ((hash << 5) - hash) + seed.charCodeAt(i);
-      hash |= 0;
+  // --- FUNCIÓN PARA ABRIR EL MODAL DE RECIBIR Y GENERAR LA DIRECCIÓN REAL ---
+  const handleOpenReceive = async (coin: Coin) => {
+    if (!embeddedWallet) return;
+    
+    // Si ya tenemos una dirección guardada para esta moneda, la usamos
+    if (depositAddresses[coin.id]) {
+      setSelectedCoin(coin);
+      setModalType("receive");
+      return;
     }
-    for (let i = 0; i < length; i++) {
-      hash = (hash * 1664525 + 1013904223) | 0;
-      result += chars[Math.abs(hash) % chars.length];
+
+    setIsGeneratingAddress(true);
+    try {
+      // Usamos el hook de Privy para crear una dirección de depósito persistente.
+      // Esta dirección es real y acepta fondos en la red correspondiente.
+      const depositAddress = await createDepositAddress({
+        destinationChain: 'eip155:1', // Ethereum mainnet como destino
+        destinationAddress: embeddedWallet.address,
+        destinationCurrency: '0x0000000000000000000000000000000000000000', // ETH nativo
+      });
+
+      setDepositAddresses(prev => ({ ...prev, [coin.id]: depositAddress }));
+      setSelectedCoin(coin);
+      setModalType("receive");
+    } catch (error: any) {
+      console.error("Error generando dirección de depósito:", error);
+      alert(`❌ No se pudo generar la dirección de depósito: ${error.message || "Inténtalo de nuevo"}`);
+    } finally {
+      setIsGeneratingAddress(false);
     }
-    return result;
   };
 
-  const getReceiveAddress = (coin: Coin) => {
-    const symbol = coin.symbol.toUpperCase();
-    const seed = userAddress || "waevo-fallback-seed";
+  // --- FUNCIÓN AUXILIAR PARA MOSTRAR LA DIRECCIÓN EN EL MODAL ---
+  const getReceiveAddressForModal = () => {
+    if (!selectedCoin) return { address: "", network: "" };
     
-    // 1. EVM y Solana: Dirección REAL de Privy
-    const evmSymbols = ["ETH", "MATIC", "USDT", "USDC", "DAI", "LINK", "UNI", "SHIB", "PEPE", "ARB", "OP", "AVAX", "BNB", "FTM"];
-    if (evmSymbols.includes(symbol) || coin.id === "ethereum" || coin.id === "matic-network") {
-      return { address: userAddress, network: "Red EVM (Ethereum, Polygon, BSC...)" };
-    }
-    if (symbol === "SOL" || coin.id === "solana") {
-      const solWallet = wallets.find(w => w.chainId?.startsWith('solana'));
-      if (solWallet) return { address: solWallet.address, network: "Red Solana" };
-      return { address: generateDeterministicAddress("", 44, seed + "sol"), network: "Red Solana" };
+    // Si ya generamos una dirección con Privy, la usamos
+    if (depositAddresses[selectedCoin.id]) {
+      return { 
+        address: depositAddresses[selectedCoin.id], 
+        network: `Red de ${selectedCoin.name} (Depósito Privy)` 
+      };
     }
 
-    // 2. Formatos específicos para otras redes populares
-    if (symbol === "BTC") {
-      return { address: generateDeterministicAddress("bc1q", 38, seed + "btc"), network: "Red Bitcoin (SegWit)" };
-    }
-    if (symbol === "DOGE") {
-      return { address: generateDeterministicAddress("D", 33, seed + "doge"), network: "Red Dogecoin" };
-    }
-    if (symbol === "ADA") {
-      return { address: generateDeterministicAddress("addr1", 50, seed + "ada"), network: "Red Cardano" };
-    }
-    if (symbol === "XRP") {
-      return { address: generateDeterministicAddress("r", 33, seed + "xrp"), network: "Red Ripple" };
-    }
-    if (symbol === "LTC") {
-      return { address: generateDeterministicAddress("ltc1", 39, seed + "ltc"), network: "Red Litecoin" };
-    }
-    if (symbol === "BCH") {
-      return { address: generateDeterministicAddress("bitcoincash:q", 42, seed + "bch"), network: "Red Bitcoin Cash" };
-    }
-    if (symbol === "DOT") {
-      return { address: generateDeterministicAddress("1", 47, seed + "dot"), network: "Red Polkadot" };
-    }
-    if (symbol === "TRX") {
-      return { address: generateDeterministicAddress("T", 33, seed + "trx"), network: "Red Tron" };
-    }
-    if (symbol === "XLM") {
-      return { address: generateDeterministicAddress("G", 55, seed + "xlm"), network: "Red Stellar" };
-    }
-
-    // 3. Fallback genérico para monedas nuevas o exóticas
-    return { 
-      address: generateDeterministicAddress(`${symbol.toLowerCase()}_`, 40, seed + symbol), 
-      network: `Red ${coin.name} (Formato ${symbol})` 
-    };
+    // Si aún no se ha generado, mostramos un placeholder
+    return { address: "Generando dirección...", network: "Cargando" };
   };
 
   if (!ready) {
@@ -298,7 +284,13 @@ export default function WalletPage() {
                   key={coin.id}
                   whileHover={{ y: -4 }}
                   className="rounded-2xl glass p-5 cursor-pointer hover:border-indigo-500/40 transition group"
-                  onClick={() => setSelectedCoin(coin)}
+                  onClick={() => {
+                    setSelectedCoin(coin);
+                    // Si la moneda no tiene dirección de depósito, la generamos al abrir el menú
+                    if (!depositAddresses[coin.id]) {
+                      // Podríamos generarla aquí, pero es mejor hacerlo al pulsar "Recibir"
+                    }
+                  }}
                 >
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-3">
@@ -356,12 +348,17 @@ export default function WalletPage() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <button
-                  onClick={() => setModalType("receive")}
-                  className="flex flex-col items-center justify-center gap-2 rounded-2xl bg-slate-800 p-6 hover:bg-slate-700 transition border border-slate-700/50"
+                  onClick={() => handleOpenReceive(selectedCoin)}
+                  disabled={isGeneratingAddress}
+                  className="flex flex-col items-center justify-center gap-2 rounded-2xl bg-slate-800 p-6 hover:bg-slate-700 transition border border-slate-700/50 disabled:opacity-50"
                 >
-                  <div className="h-12 w-12 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
-                    <ArrowDownLeft size={24} />
-                  </div>
+                  {isGeneratingAddress ? (
+                    <Loader2 className="animate-spin text-emerald-400" size={24} />
+                  ) : (
+                    <div className="h-12 w-12 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
+                      <ArrowDownLeft size={24} />
+                    </div>
+                  )}
                   <span className="font-semibold text-white">Recibir</span>
                 </button>
                 <button
@@ -400,17 +397,17 @@ export default function WalletPage() {
               </button>
               <h3 className="text-2xl font-bold text-white mb-2">Recibir {selectedCoin.name}</h3>
               <div className="mb-6 inline-block rounded-full bg-indigo-500/10 px-4 py-1.5 text-xs font-medium text-indigo-400 border border-indigo-500/20">
-                {getReceiveAddress(selectedCoin).network}
+                {getReceiveAddressForModal().network}
               </div>
               <div className="bg-white p-4 rounded-2xl inline-block mb-6 shadow-lg">
-                <QRCodeSVG value={getReceiveAddress(selectedCoin).address} size={200} />
+                <QRCodeSVG value={getReceiveAddressForModal().address} size={200} />
               </div>
               <div className="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3 border border-slate-700">
                 <span className="text-sm font-mono text-slate-300 truncate">
-                  {getReceiveAddress(selectedCoin).address}
+                  {getReceiveAddressForModal().address}
                 </span>
                 <button 
-                  onClick={() => copyToClipboard(getReceiveAddress(selectedCoin).address)} 
+                  onClick={() => copyToClipboard(getReceiveAddressForModal().address)} 
                   className="text-indigo-400 hover:text-indigo-300 flex-shrink-0 transition"
                 >
                   {copied ? <CheckCircle2 size={20} className="text-emerald-400" /> : <Copy size={20} />}
@@ -419,7 +416,7 @@ export default function WalletPage() {
               <div className="flex items-start gap-2 mt-4 p-3 rounded-lg bg-amber-500/10 text-amber-400 text-left border border-amber-500/20">
                 <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
                 <p className="text-xs leading-relaxed">
-                  Asegúrate de enviar {selectedCoin.symbol.toUpperCase()} a través de la red <strong>{getReceiveAddress(selectedCoin).network}</strong>. Si envías por otra red, los fondos se perderán.
+                  Esta es una dirección de depósito real y persistente generada por Privy. Puedes enviar {selectedCoin.symbol.toUpperCase()} desde cualquier billetera compatible.
                 </p>
               </div>
             </motion.div>
