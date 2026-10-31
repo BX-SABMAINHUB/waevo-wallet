@@ -6,7 +6,6 @@ import { createPublicClient, http, formatEther, parseEther } from "viem";
 import { mainnet } from "viem/chains";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
-import { Coinlib } from "coinlib-sdk";
 import { 
   Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, 
   ShieldCheck, Wallet, AlertCircle, Loader2, TrendingUp, TrendingDown
@@ -47,6 +46,7 @@ export default function WalletPage() {
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const userAddress: string = embeddedWallet?.address || "";
 
+  // 1. Obtener saldo real de ETH
   useEffect(() => {
     if (!userAddress) {
       setIsBalanceLoading(false);
@@ -68,11 +68,12 @@ export default function WalletPage() {
     fetchBalance();
   }, [userAddress]);
 
+  // 2. Obtener lista de monedas
   useEffect(() => {
     async function fetchCoins() {
       try {
         const res = await fetch(
-          "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&sparkline=false"
+          "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false"
         );
         const data = await res.json();
         setCoins(data);
@@ -91,6 +92,7 @@ export default function WalletPage() {
       coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
+  // 3. Enviar transacción
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!embeddedWallet || !selectedCoin) return;
@@ -102,11 +104,6 @@ export default function WalletPage() {
       setModalType(null);
       setSendAddress("");
       setSendAmount("");
-      if (userAddress) {
-        const client = createPublicClient({ chain: mainnet, transport: http() });
-        const balanceWei = await client.getBalance({ address: userAddress as `0x${string}` });
-        setNativeBalance(formatEther(balanceWei));
-      }
     } catch (error: any) {
       console.error("Error al enviar:", error);
       alert(`❌ Error: ${error.message || "Revisa tu conexión o saldo"}`);
@@ -126,6 +123,7 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
+  // 4. GENERACIÓN DE BILLETERA VÍA TATUM / PRIVY
   const handleOpenReceive = async (coin: Coin) => {
     if (!embeddedWallet) return;
 
@@ -137,40 +135,28 @@ export default function WalletPage() {
 
     setIsGeneratingAddress(true);
     try {
-      const symbol = coin.symbol.toUpperCase();
+      const res = await fetch('/api/generate-address', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: coin.symbol }),
+      });
 
-      // 1. EVM y Solana: usamos la dirección real de Privy
-      const evmSymbols = ["ETH", "MATIC", "USDT", "USDC", "BNB", "AVAX", "ARB", "OP", "BASE"];
-      if (evmSymbols.includes(symbol)) {
-        setDepositAddresses(prev => ({ ...prev, [coin.id]: embeddedWallet.address }));
-        setSelectedCoin(coin);
-        setModalType("receive");
-        return;
-      }
+      const data = await res.json();
 
-      // 2. Resto de monedas: usamos coinlib-sdk
-      const seed = `waevo-seed-${embeddedWallet.address.slice(2, 10)}`;
-      
-      const config = {
-        coins: symbol,
-        network: "mainnet" as const,
-        seed: seed,
-      };
+      if (!res.ok) throw new Error(data.error || 'Error generando dirección');
 
-      const coinlib = new Coinlib(config);
-      
-      // En la versión 3.2.0, deriveAddress devuelve una promesa.
-      // Usamos una aserción de tipo para evitar errores de TypeScript.
-      const derived = await (coinlib as any).deriveAddress(0);
-      const address = typeof derived === 'string' ? derived : derived.address;
+      // Si es EVM (o no está en Tatum) usamos Privy. Si no, Tatum.
+      const finalAddress = data.isEvm ? embeddedWallet.address : data.address;
 
-      setDepositAddresses(prev => ({ ...prev, [coin.id]: address }));
+      setDepositAddresses(prev => ({ ...prev, [coin.id]: finalAddress }));
       setSelectedCoin(coin);
       setModalType("receive");
-
     } catch (error: any) {
-      console.error("Error generando dirección con coinlib-sdk:", error);
-      alert(`❌ No se pudo generar la dirección para ${coin.name}. Error: ${error.message}`);
+      console.error("Error:", error);
+      // Fallback: si falla, usamos la de Privy
+      setDepositAddresses(prev => ({ ...prev, [coin.id]: embeddedWallet.address }));
+      setSelectedCoin(coin);
+      setModalType("receive");
     } finally {
       setIsGeneratingAddress(false);
     }
@@ -178,15 +164,15 @@ export default function WalletPage() {
 
   const getReceiveAddressForModal = () => {
     if (!selectedCoin) return { address: "", network: "" };
-    if (depositAddresses[selectedCoin.id]) {
-      const symbol = selectedCoin.symbol.toUpperCase();
-      const isEvm = ["ETH", "MATIC", "USDT", "USDC", "BNB", "AVAX", "ARB", "OP", "BASE"].includes(symbol);
+    const address = depositAddresses[selectedCoin.id];
+    if (address) {
+      const isPrivyAddr = address === embeddedWallet?.address;
       return { 
-        address: depositAddresses[selectedCoin.id], 
-        network: isEvm ? "Red EVM / Compatible" : `Red ${selectedCoin.name}` 
+        address: address, 
+        network: isPrivyAddr ? `Red EVM / Token` : `Red ${selectedCoin.name}` 
       };
     }
-    return { address: "Generando dirección...", network: "Cargando" };
+    return { address: "", network: "" };
   };
 
   if (!ready) {
@@ -213,7 +199,7 @@ export default function WalletPage() {
           </div>
           <h2 className="text-2xl font-bold text-white mb-2">Activa tu Billetera Cripto</h2>
           <p className="text-sm text-slate-400 mb-8 leading-relaxed">
-            Para empezar a enviar y recibir criptomonedas, necesitas crear tu billetera segura. Es gratis, no custodiada y solo tarda un segundo.
+            Para empezar a enviar y recibir criptomonedas, necesitas crear tu billetera segura.
           </p>
           <button
             onClick={login}
@@ -230,6 +216,7 @@ export default function WalletPage() {
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
         
+        {/* CABECERA */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -265,6 +252,7 @@ export default function WalletPage() {
           </div>
         </motion.div>
 
+        {/* BUSCADOR */}
         <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h2 className="text-2xl font-bold text-white">Tus Activos</h2>
@@ -282,6 +270,7 @@ export default function WalletPage() {
           </div>
         </div>
 
+        {/* LISTA DE MONEDAS */}
         {loading ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[...Array(6)].map((_, i) => (
@@ -330,6 +319,7 @@ export default function WalletPage() {
         )}
       </div>
 
+      {/* MODAL 1: ACCIONES */}
       <AnimatePresence>
         {selectedCoin && !modalType && (
           <motion.div
@@ -355,6 +345,7 @@ export default function WalletPage() {
                   <X size={20} />
                 </button>
               </div>
+              
               <div className="grid grid-cols-2 gap-4">
                 <button
                   onClick={() => handleOpenReceive(selectedCoin)}
@@ -385,6 +376,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
+      {/* MODAL 2: RECIBIR */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
           <motion.div
@@ -425,7 +417,7 @@ export default function WalletPage() {
               <div className="flex items-start gap-2 mt-4 p-3 rounded-lg bg-amber-500/10 text-amber-400 text-left border border-amber-500/20">
                 <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
                 <p className="text-xs leading-relaxed">
-                  Esta es una dirección determinista generada para {selectedCoin.name}. Asegúrate de enviar {selectedCoin.symbol.toUpperCase()} a través de la red correcta.
+                  Esta es una dirección real para {selectedCoin.name}. Asegúrate de enviar {selectedCoin.symbol.toUpperCase()} a través de la red correcta.
                 </p>
               </div>
             </motion.div>
@@ -433,6 +425,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
+      {/* MODAL 3: ENVIAR */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <motion.div
