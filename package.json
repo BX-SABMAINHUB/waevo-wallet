@@ -15,7 +15,7 @@
     "@privy-io/react-auth": "^2.0.0",
     "firebase": "^11.1.0",
     "firebase-admin": "^13.0.0",
-    "highcharts": "^12.2.0",
+    "highcharts": "^13.0.0",
     "lucide-react": "^0.460.0",
     "motion": "^12.0.0",
     "next": "^15.1.0",
