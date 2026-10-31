@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Explorar Monedas - Waevo Wallet</title>
+  <!-- Usamos Tailwind vía CDN para que se vea igual de bien que tu app -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #020617; color: #f1f5f9; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .glass { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(14px); border: 1px solid rgba(148, 163, 184, 0.12); }
+    /* Efecto de fondo */
+    .aurora { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; overflow: hidden; }
+    .aurora::before { content: ""; position: absolute; width: 600px; height: 600px; border-radius: 50%; background: #6366f1; filter: blur(120px); opacity: 0.2; top: -200px; left: -150px; }
+    .aurora::after { content: ""; position: absolute; width: 600px; height: 600px; border-radius: 50%; background: #22d3ee; filter: blur(120px); opacity: 0.2; bottom: -250px; right: -200px; }
+  </style>
+</head>
+<body class="min-h-screen relative">
+  <div class="aurora"></div>
+
+  <div class="max-w-6xl mx-auto p-6 md:p-10">
+    <!-- Cabecera -->
+    <div class="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
+      <div>
+        <h1 class="text-3xl font-bold tracking-tight text-white">Explorar monedas</h1>
+        <p class="text-sm text-slate-400 mt-1">Busca cualquier criptomoneda y abre su gráfico avanzado.</p>
+      </div>
+      <div class="relative">
+        <svg class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+        <input type="text" id="searchInput" placeholder="Buscar moneda..." class="w-full md:w-72 rounded-xl border border-slate-700 bg-slate-900/60 py-2.5 pl-10 pr-4 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500">
+      </div>
+    </div>
+
+    <!-- Contenedor de monedas -->
+    <div id="coinsGrid" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <!-- Aquí JavaScript inyectará las tarjetas -->
+      <div class="h-24 animate-pulse rounded-2xl bg-slate-800/50"></div>
+      <div class="h-24 animate-pulse rounded-2xl bg-slate-800/50"></div>
+      <div class="h-24 animate-pulse rounded-2xl bg-slate-800/50"></div>
+    </div>
+  </div>
+
+  <!-- Pantalla completa para el gráfico -->
+  <div id="chartModal" class="fixed inset-0 z-50 flex-col bg-slate-950 hidden">
+    <div class="flex items-center justify-between border-b border-slate-800 p-4 bg-slate-900">
+      <div class="flex items-center gap-3">
+        <img id="modalImg" src="" class="h-8 w-8 rounded-full" alt="Icon">
+        <h2 id="modalTitle" class="text-xl font-bold text-white"></h2>
+      </div>
+      <button onclick="closeChart()" class="rounded-lg bg-slate-800 p-2 text-slate-400 hover:bg-slate-700 hover:text-white transition">
+        <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path></svg>
+      </button>
+    </div>
+    <div class="flex-1 w-full bg-slate-900">
+      <iframe id="tradingviewFrame" src="" style="width: 100%; height: 100%; border: none;" allowfullscreen></iframe>
+    </div>
+  </div>
+
+  <script>
+    let allCoins = [];
+
+    // 1. Cargar monedas de la API
+    async function fetchCoins() {
+      try {
+        const res = await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false');
+        allCoins = await res.json();
+        renderCoins(allCoins);
+      } catch (error) {
+        document.getElementById('coinsGrid').innerHTML = '<p class="text-red-400">Error al cargar las monedas.</p>';
+      }
+    }
+
+    // 2. Pintar las tarjetas
+    function renderCoins(coins) {
+      const grid = document.getElementById('coinsGrid');
+      if (coins.length === 0) {
+        grid.innerHTML = '<p class="text-slate-400 col-span-full">No se encontraron monedas.</p>';
+        return;
+      }
+
+      grid.innerHTML = coins.map(coin => `
+        <div onclick='openChart(${JSON.stringify(coin).replace(/'/g, "&#39;")})' class="cursor-pointer rounded-2xl glass p-5 transition hover:border-indigo-500/50 hover:-translate-y-1">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <img src="${coin.image}" alt="${coin.name}" class="h-8 w-8 rounded-full">
+              <div>
+                <h3 class="font-semibold text-white">${coin.name}</h3>
+                <span class="text-xs uppercase text-slate-400">${coin.symbol}</span>
+              </div>
+            </div>
+            <div class="text-right">
+              <div class="font-medium text-white">$${coin.current_price.toLocaleString()}</div>
+              <div class="flex items-center justify-end gap-1 text-xs font-medium ${coin.price_change_percentage_24h >= 0 ? 'text-emerald-400' : 'text-red-400'}">
+                ${coin.price_change_percentage_24h >= 0 ? '▲' : '▼'} 
+                ${Math.abs(coin.price_change_percentage_24h || 0).toFixed(2)}%
+              </div>
+            </div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // 3. Buscador
+    document.getElementById('searchInput').addEventListener('input', (e) => {
+      const search = e.target.value.toLowerCase();
+      const filtered = allCoins.filter(c => c.name.toLowerCase().includes(search) || c.symbol.toLowerCase().includes(search));
+      renderCoins(filtered);
+    });
+
+    // 4. Abrir gráfico
+    function openChart(coin) {
+      const symbol = coin.symbol.toUpperCase() + 'USDT';
+      const url = `https://s.tradingview.com/widgetembed/?symbol=BINANCE%3A${symbol}&interval=D&hidesidetoolbar=0&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=%5B%5D&theme=dark&style=1&timezone=Etc%2FUTC&withdateranges=1&showpopupbutton=1`;
+      
+      document.getElementById('modalImg').src = coin.image;
+      document.getElementById('modalTitle').innerText = coin.name + ' (' + coin.symbol.toUpperCase() + ')';
+      document.getElementById('tradingviewFrame').src = url;
+      
+      const modal = document.getElementById('chartModal');
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    // 5. Cerrar gráfico
+    function closeChart() {
+      const modal = document.getElementById('chartModal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+      document.getElementById('tradingviewFrame').src = '';
+    }
+
+    // Iniciar
+    fetchCoins();
+  </script>
+</body>
+</html>
