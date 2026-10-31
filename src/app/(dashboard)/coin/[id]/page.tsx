@@ -1,20 +1,13 @@
 "use client";
 
-import dynamic from "next/dynamic";
 import { use } from "react";
-
-// Importación dinámica: el gráfico solo se carga en el navegador
-const CoinChart = dynamic(
-  () => import("@/components/charts/CoinChart").then((mod) => mod.CoinChart),
-  { ssr: false }
-);
+import { CoinChart } from "@/components/charts/CoinChart";
 
 interface CoinPageProps {
   params: Promise<{ id: string }>;
 }
 
 export default function CoinPage({ params }: CoinPageProps) {
-  // Desenvolvemos los params con el hook `use` de React
   const { id } = use(params);
 
   return (
@@ -23,7 +16,6 @@ export default function CoinPage({ params }: CoinPageProps) {
         <h1 className="mb-6 text-3xl font-bold capitalize">
           {id.replace("-", " ")}
         </h1>
-        
         <div className="rounded-2xl glass p-4 md:p-6">
           <CoinChart coinId={id} />
         </div>
