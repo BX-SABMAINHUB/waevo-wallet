@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { useWallets, useSendTransaction, useDepositAddress, usePrivy } from "@privy-io/react-auth";
+import { useWallets, useSendTransaction, usePrivy } from "@privy-io/react-auth";
 import { createPublicClient, http, formatEther, parseEther } from "viem";
 import { mainnet } from "viem/chains";
 import { QRCodeSVG } from "qrcode.react";
@@ -20,7 +20,6 @@ export default function WalletPage() {
   const { ready } = usePrivy();
   const { wallets } = useWallets();
   const { sendTransaction } = useSendTransaction();
-  const { createDepositAddress } = useDepositAddress();
 
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
@@ -38,29 +37,26 @@ export default function WalletPage() {
   const [isSending, setIsSending] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // 1. Obtener la billetera de Privy
+  // 1. Obtener la billetera de Privy y su dirección real
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const userAddress = embeddedWallet?.address;
 
   // 2. Consultar el saldo real on-chain con viem
   useEffect(() => {
-    if (!userAddress || !embeddedWallet) return;
+    if (!userAddress) return;
 
     const fetchBalance = async () => {
       setIsBalanceLoading(true);
       try {
-        // Creamos un cliente público para leer la blockchain de Ethereum
         const client = createPublicClient({
           chain: mainnet,
           transport: http(),
         });
 
-        // Obtenemos el saldo en wei
         const balanceWei = await client.getBalance({
           address: userAddress as `0x${string}`,
         });
 
-        // Lo convertimos a ETH (string legible)
         setNativeBalance(formatEther(balanceWei));
       } catch (error) {
         console.error("Error obteniendo saldo:", error);
@@ -71,9 +67,9 @@ export default function WalletPage() {
     };
 
     fetchBalance();
-  }, [userAddress, embeddedWallet]);
+  }, [userAddress]);
 
-  // Cargar monedas (solo para el listado visual)
+  // Cargar monedas para el listado
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -97,26 +93,25 @@ export default function WalletPage() {
       coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
-  // 3. Enviar transacción REAL
+  // 3. Enviar transacción REAL con Privy
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!embeddedWallet || !selectedCoin) return;
 
     setIsSending(true);
     try {
-      // Convertimos la cantidad a wei (para ETH nativo)
       const valueInWei = parseEther(sendAmount);
 
-      // Llamamos a la función real de Privy
       const { hash } = await sendTransaction({
         to: sendAddress,
-        value: valueInWei, // Para tokens ERC-20, esto cambiaría a data
+        value: valueInWei,
       });
 
       alert(`✅ Transacción enviada con éxito. Hash: ${hash}`);
       setModalType(null);
       setSendAddress("");
       setSendAmount("");
+      
       // Refrescamos el saldo después de enviar
       if (userAddress) {
         const client = createPublicClient({ chain: mainnet, transport: http() });
@@ -131,18 +126,9 @@ export default function WalletPage() {
     }
   };
 
-  // 4. Generar dirección de depósito (o usar la dirección de la wallet)
-  const handleReceive = async () => {
+  // 4. Abrir modal de recibir (usando la dirección real de la billetera)
+  const handleReceive = () => {
     if (!embeddedWallet) return;
-    // Opción A: Usar la dirección de la wallet directamente
-    // Opción B: Usar createDepositAddress para una dirección de depósito dedicada
-    // Aquí usamos la dirección de la wallet para simplificar y mostrar la real.
-    // Si quieres usar la dirección de depósito dedicada, descomenta:
-    // await createDepositAddress({
-    //   destinationChain: 'eip155:1', // Ethereum
-    //   destinationAddress: embeddedWallet.address,
-    //   destinationCurrency: '0x0000000000000000000000000000000000000000', // ETH nativo
-    // });
     setModalType("receive");
   };
 
@@ -154,7 +140,7 @@ export default function WalletPage() {
     }
   };
 
-  // El saldo total en USD (solo ETH por ahora, pero puedes ampliarlo)
+  // Saldo total en USD (ETH por ahora)
   const totalUsd = useMemo(() => {
     const ethPrice = coins.find((c) => c.id === "ethereum")?.current_price || 0;
     return parseFloat(nativeBalance) * ethPrice;
@@ -179,7 +165,7 @@ export default function WalletPage() {
                 ${totalUsd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </h1>
               <p className="text-sm text-slate-400 mt-1">
-                {isBalanceLoading ? "Calculando..." : `${nativeBalance} ETH`}
+                {isBalanceLoading ? "Calculando..." : `${parseFloat(nativeBalance).toFixed(6)} ETH`}
               </p>
             </div>
             <div className="flex flex-col items-start md:items-end">
@@ -192,7 +178,7 @@ export default function WalletPage() {
                 className="mt-3 flex items-center gap-2 text-xs text-slate-400 hover:text-white transition"
               >
                 {copied ? <CheckCircle2 size={14} className="text-emerald-400" /> : <Copy size={14} />}
-                {userAddress ? `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}` : "Sin dirección"}
+                {userAddress ? `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}` : "Conectando..."}
               </button>
             </div>
           </div>
@@ -216,7 +202,7 @@ export default function WalletPage() {
           </div>
         </div>
 
-        {/* LISTA DE MONEDAS CON SALDO REAL (solo ETH por ahora) */}
+        {/* LISTA DE MONEDAS CON SALDO REAL */}
         {loading ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[...Array(6)].map((_, i) => (
@@ -226,8 +212,8 @@ export default function WalletPage() {
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {filteredCoins.map((coin) => {
-              // Para ETH mostramos el saldo real. Para el resto, 0.
               const isEth = coin.id === "ethereum";
+              // Si no es ETH o el saldo es 0, mostramos 0.0000
               const balanceDisplay = isEth ? parseFloat(nativeBalance).toFixed(4) : "0.0000";
               
               return (
@@ -314,7 +300,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* MODAL DE RECIBIR (CON DIRECCIÓN REAL) */}
+      {/* MODAL DE RECIBIR (DIRECCIÓN REAL) */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
           <motion.div
