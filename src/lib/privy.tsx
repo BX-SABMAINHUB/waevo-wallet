@@ -8,12 +8,18 @@ export function PrivyWrapper({ children }: { children: React.ReactNode }) {
       appId={process.env.NEXT_PUBLIC_PRIVY_APP_ID!}
       config={{
         embeddedWallets: {
-          createOnLogin: "users-without-wallets",
+          ethereum: {
+            createOnLogin: "users-without-wallets",
+          },
+          solana: {
+            createOnLogin: "users-without-wallets",
+          },
         },
         appearance: {
           theme: "dark",
           accentColor: "#6366f1",
         },
+        loginMethods: ["email", "google", "apple"],
       }}
     >
       {children}
