@@ -7,7 +7,8 @@ import { auth } from "@/lib/firebase";
 import { 
   RefreshCw, CheckCircle2, Clock, Wallet, Loader2, 
   AlertCircle, Search, ChevronDown, ExternalLink, 
-  ArrowDownLeft, ShieldCheck, Zap, Activity, Copy, X
+  ArrowDownLeft, ShieldCheck, Zap, Activity, Copy, X,
+  TrendingUp, TrendingDown
 } from "lucide-react";
 
 interface Coin {
@@ -57,6 +58,7 @@ export default function HistoryPage() {
   const [isTxModalOpen, setIsTxModalOpen] = useState(false);
   const [copiedHash, setCopiedHash] = useState(false);
 
+  // 1. Cargar monedas
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -72,6 +74,7 @@ export default function HistoryPage() {
     fetchCoins();
   }, []);
 
+  // 2. Cerrar dropdown al hacer clic fuera
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -82,12 +85,25 @@ export default function HistoryPage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  // 3. Polling automático para actualizar la transacción seleccionada
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isTxModalOpen && selectedTx && selectedTx.status === 'pending') {
+      interval = setInterval(() => {
+        // Volver a consultar los depósitos
+        fetchDeposits();
+      }, 10000); // Cada 10 segundos
+    }
+    return () => clearInterval(interval);
+  }, [isTxModalOpen, selectedTx]);
+
   const filteredCoins = coins.filter(
     (coin) =>
       coin.name.toLowerCase().includes(search.toLowerCase()) ||
       coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
+  // 4. Seleccionar moneda y generar dirección
   const handleSelectCoin = async (coin: Coin) => {
     setSelectedCoin(coin);
     setIsDropdownOpen(false);
@@ -119,6 +135,7 @@ export default function HistoryPage() {
     }
   };
 
+  // 5. Obtener depósitos y actualizar el estado
   const fetchDeposits = async () => {
     if (!selectedCoin || !depositAddresses[selectedCoin.id]) return;
     
@@ -149,7 +166,7 @@ export default function HistoryPage() {
   };
 
   const handleCheckDeposits = () => {
-    setDeposits([]); // Limpiar antes de buscar
+    setDeposits([]);
     fetchDeposits();
   };
 
@@ -164,7 +181,7 @@ export default function HistoryPage() {
     setTimeout(() => setCopiedHash(false), 2000);
   };
 
-  // Calcular progreso y tiempo estimado para el modal
+  // 6. Calcular progreso y tiempo estimado
   const getTxDetails = (tx: Deposit) => {
     const symbol = tx.symbol.toUpperCase();
     const config = NETWORK_CONFIG[symbol] || NETWORK_CONFIG.DEFAULT;
@@ -188,6 +205,11 @@ export default function HistoryPage() {
     return { progressPercentage, timeString, remainingConf, requiredConf, currentConf };
   };
 
+  // 7. Calcular saldo total recibido (solo confirmados)
+  const totalReceived = deposits
+    .filter(d => d.status === 'confirmed')
+    .reduce((acc, d) => acc + parseFloat(d.amount), 0);
+
   if (!ready) return <div className="p-10 text-white">Cargando...</div>;
 
   const currentAddress = selectedCoin ? depositAddresses[selectedCoin.id] : null;
@@ -195,7 +217,6 @@ export default function HistoryPage() {
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10 relative overflow-hidden">
       
-      {/* Fondo decorativo animado */}
       <motion.div 
         animate={{ scale: [1, 1.2, 1], opacity: [0.1, 0.2, 0.1] }} 
         transition={{ duration: 8, repeat: Infinity }}
@@ -204,9 +225,25 @@ export default function HistoryPage() {
 
       <div className="mx-auto max-w-5xl relative z-10">
         
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-8">
-          <h1 className="text-3xl font-bold text-white mb-2">Ingresos y Historial</h1>
-          <p className="text-slate-400 text-sm">Selecciona una moneda y verifica si has recibido fondos on-chain.</p>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-white mb-2">Ingresos y Historial</h1>
+            <p className="text-slate-400 text-sm">Selecciona una moneda y verifica si has recibido fondos on-chain.</p>
+          </div>
+          {/* Saldo total recibido */}
+          {selectedCoin && (
+            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex items-center gap-4">
+              <div className="h-10 w-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-400">
+                <TrendingUp size={20} />
+              </div>
+              <div>
+                <p className="text-xs text-slate-400">Saldo Recibido</p>
+                <p className="text-xl font-bold text-white">
+                  {totalReceived.toFixed(4)} {selectedCoin.symbol.toUpperCase()}
+                </p>
+              </div>
+            </div>
+          )}
         </motion.div>
 
         {/* PANEL DE CONTROL */}
@@ -340,7 +377,9 @@ export default function HistoryPage() {
                           Recibiendo {d.amount} <span className="text-indigo-400">{d.symbol}</span>
                         </p>
                         <p className="text-sm text-slate-400">
-                          {d.status === 'confirmed' ? 'Confirmado en la blockchain' : `Procesando (${d.confirmations} confirmaciones)`}
+                          {d.status === 'confirmed' 
+                            ? 'Confirmado y añadido al saldo' 
+                            : `Procesando (${d.confirmations} confirmaciones)`}
                         </p>
                       </div>
                     </div>
@@ -350,8 +389,6 @@ export default function HistoryPage() {
                       </span>
                     </div>
                   </div>
-                  
-                  {/* Brillo de fondo al hacer hover */}
                   <div className="absolute inset-0 bg-gradient-to-r from-indigo-500/0 via-indigo-500/5 to-indigo-500/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000" />
                 </motion.div>
               ))}
@@ -360,9 +397,7 @@ export default function HistoryPage() {
         </AnimatePresence>
       </div>
 
-      {/* ========================================== */}
-      {/* MODAL DETALLADO DE TRANSACCIÓN (ANIMADO)   */}
-      {/* ========================================== */}
+      {/* MODAL DETALLADO DE TRANSACCIÓN */}
       <AnimatePresence>
         {isTxModalOpen && selectedTx && (
           <motion.div
@@ -380,11 +415,10 @@ export default function HistoryPage() {
               onClick={(e) => e.stopPropagation()}
               className="w-full max-w-lg rounded-[2rem] border border-slate-700/50 bg-gradient-to-b from-slate-900 to-slate-950 p-1 shadow-2xl overflow-hidden relative"
             >
-              {/* Brillo superior */}
               <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3/4 h-1 bg-gradient-to-r from-transparent via-indigo-500 to-transparent opacity-50" />
 
               <div className="p-6 sm:p-8">
-                {/* Cabecera del Modal */}
+                {/* Cabecera */}
                 <div className="flex justify-between items-start mb-8">
                   <div className="flex items-center gap-4">
                     <div className="h-14 w-14 rounded-full bg-indigo-500/10 flex items-center justify-center text-indigo-400 border border-indigo-500/20 shadow-[0_0_20px_rgba(99,102,241,0.2)]">
@@ -419,11 +453,11 @@ export default function HistoryPage() {
                       : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
                   }`}>
                     {selectedTx.status === 'confirmed' ? <ShieldCheck size={14} /> : <Loader2 size={14} className="animate-spin" />}
-                    {selectedTx.status === 'confirmed' ? 'Transacción Completada' : 'Esperando Confirmaciones'}
+                    {selectedTx.status === 'confirmed' ? 'Añadido al saldo' : 'Esperando Confirmaciones'}
                   </div>
                 </div>
 
-                {/* Barra de Progreso Animada */}
+                {/* Barra de Progreso */}
                 {selectedTx.status === 'pending' && (
                   <div className="mb-8 bg-slate-900/80 rounded-2xl p-5 border border-slate-800">
                     <div className="flex justify-between text-xs font-medium mb-3">
@@ -479,7 +513,7 @@ export default function HistoryPage() {
                   </div>
                 </div>
 
-                {/* Botón de Explorador */}
+                {/* Botón Explorador */}
                 <a 
                   href={`https://blockchair.com/search?q=${selectedTx.hash}`}
                   target="_blank"
