@@ -3,18 +3,20 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Compass, Wallet, Settings } from "lucide-react";
+import { LayoutDashboard, Compass, Wallet, History, Settings } from "lucide-react";
 
-// Cargamos Privy SOLO en el cliente para evitar el error de createContext
+// Cargamos Privy SOLO en el cliente para evitar errores de SSR (createContext)
 const PrivyWrapper = dynamic(
   () => import("@/lib/privy").then((mod) => mod.PrivyWrapper),
   { ssr: false }
 );
 
+// Menú de navegación lateral
 const NAV_ITEMS = [
   { name: "Overview", href: "/overview", icon: LayoutDashboard },
   { name: "Explorar", href: "/explore", icon: Compass },
   { name: "Tu Billetera", href: "/wallet", icon: Wallet },
+  { name: "Ingresos y Historial", href: "/history", icon: History }, // 👈 Nuevo enlace
   { name: "Ajustes", href: "/settings", icon: Settings },
 ];
 
