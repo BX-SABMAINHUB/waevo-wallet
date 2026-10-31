@@ -2,20 +2,16 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { useWallets, useSendTransaction, usePrivy } from "@privy-io/react-auth";
-// ✅ Importamos el hook headless para generar direcciones
-import { useDepositAddress } from "@privy-io/react-auth/hooks";
 import { createPublicClient, http, formatEther, parseEther } from "viem";
 import { mainnet } from "viem/chains";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
+import { Coinlib } from "coinlib-sdk"; // ✅ Importamos coinlib-sdk
 import { 
   Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, 
   ShieldCheck, Wallet, AlertCircle, Loader2, TrendingUp, TrendingDown
 } from "lucide-react";
 
-// ==========================================
-// TIPOS E INTERFACES
-// ==========================================
 interface Coin {
   id: string;
   symbol: string;
@@ -25,73 +21,33 @@ interface Coin {
   price_change_percentage_24h: number;
 }
 
-// ==========================================
-// MAPEO DE REDES Y MONEDAS (CAIP-2)
-// ==========================================
-// Mapeo de símbolos a sus cadenas correspondientes
-const CHAIN_MAP: Record<string, string> = {
-  ETH: "eip155:1",        // Ethereum Mainnet
-  MATIC: "eip155:137",    // Polygon
-  BNB: "eip155:56",       // Binance Smart Chain
-  AVAX: "eip155:43114",   // Avalanche
-  ARB: "eip155:42161",    // Arbitrum
-  OP: "eip155:10",        // Optimism
-  BASE: "eip155:8453",    // Base
-  BTC: "bip122:000000000019d6689c085ae165831e93", // Bitcoin
-  SOL: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", // Solana
-  // Si una moneda no está aquí, usaremos Ethereum por defecto
-};
-
-// Mapeo de símbolos a sus contratos (o nativo)
-const CURRENCY_MAP: Record<string, string> = {
-  ETH: "0x0000000000000000000000000000000000000000", // Nativo
-  MATIC: "0x0000000000000000000000000000000000000000", // Nativo
-  BTC: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", // WBTC (para puenteo EVM)
-  SOL: "0x0000000000000000000000000000000000000000",
-};
-
 export default function WalletPage() {
-  // ==========================================
-  // HOOKS DE PRIVY Y VIEM
-  // ==========================================
   const { ready, authenticated, login } = usePrivy();
   const { wallets } = useWallets();
   const { sendTransaction } = useSendTransaction();
-  const { generateDepositAddress } = useDepositAddress(); 
 
-  // ==========================================
-  // ESTADOS DE LA UI
-  // ==========================================
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
   const [modalType, setModalType] = useState<"send" | "receive" | null>(null);
   
-  // Estados de saldo
   const [nativeBalance, setNativeBalance] = useState<string>("0");
   const [isBalanceLoading, setIsBalanceLoading] = useState(true);
 
-  // Estados del formulario de envío
   const [sendAddress, setSendAddress] = useState("");
   const [sendAmount, setSendAmount] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [selectedNetwork, setSelectedNetwork] = useState("Ethereum");
 
-  // Estados de direcciones generadas
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Obtener la billetera del usuario
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const userAddress: string = embeddedWallet?.address || "";
 
-  // ==========================================
-  // EFECTOS SECUNDARIOS
-  // ==========================================
   useEffect(() => {
-    // 1. Consultar saldo de ETH on-chain
     if (!userAddress) {
       setIsBalanceLoading(false);
       return;
@@ -113,7 +69,6 @@ export default function WalletPage() {
   }, [userAddress]);
 
   useEffect(() => {
-    // 2. Cargar monedas desde CoinGecko
     async function fetchCoins() {
       try {
         const res = await fetch(
@@ -130,9 +85,6 @@ export default function WalletPage() {
     fetchCoins();
   }, []);
 
-  // ==========================================
-  // FUNCIONES DE LÓGICA
-  // ==========================================
   const filteredCoins = coins.filter(
     (coin) =>
       coin.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -142,18 +94,14 @@ export default function WalletPage() {
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!embeddedWallet || !selectedCoin) return;
-    
     setIsSending(true);
     try {
       const valueInWei = parseEther(sendAmount);
       const { hash } = await sendTransaction({ to: sendAddress, value: valueInWei });
-      
       alert(`✅ Transacción enviada.\nHash: ${hash}`);
       setModalType(null);
       setSendAddress("");
       setSendAmount("");
-      
-      // Refrescar saldo
       if (userAddress) {
         const client = createPublicClient({ chain: mainnet, transport: http() });
         const balanceWei = await client.getBalance({ address: userAddress as `0x${string}` });
@@ -178,13 +126,10 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
-  // ==========================================
-  // GENERACIÓN DE DIRECCIÓN DE DEPÓSITO
-  // ==========================================
+  // --- LA MAGIA: GENERACIÓN DE DIRECCIONES CON COINLIB-SDK ---
   const handleOpenReceive = async (coin: Coin) => {
     if (!embeddedWallet) return;
 
-    // Si ya generamos la dirección antes, la mostramos
     if (depositAddresses[coin.id]) {
       setSelectedCoin(coin);
       setModalType("receive");
@@ -194,36 +139,37 @@ export default function WalletPage() {
     setIsGeneratingAddress(true);
     try {
       const symbol = coin.symbol.toUpperCase();
-      const destinationChain = CHAIN_MAP[symbol] || "eip155:1"; 
-      const destinationCurrency = CURRENCY_MAP[symbol] || symbol; 
 
-      // Llamada a Privy con TODOS los parámetros requeridos
-      const result = await generateDepositAddress({
-        sourceChain: "eip155:1",
-        sourceCurrency: "0x0000000000000000000000000000000000000000",
-        destinationChain: destinationChain,
-        destinationAddress: embeddedWallet.address,
-        destinationCurrency: destinationCurrency,
-      });
+      // 1. Para EVM y Solana, usamos la dirección REAL de Privy
+      const evmSymbols = ["ETH", "MATIC", "USDT", "USDC", "BNB", "AVAX", "ARB", "OP", "BASE"];
+      if (evmSymbols.includes(symbol)) {
+        setDepositAddresses(prev => ({ ...prev, [coin.id]: embeddedWallet.address }));
+        setSelectedCoin(coin);
+        setModalType("receive");
+        return;
+      }
 
-      const address = result.deposit_address;
+      // 2. Para el resto de monedas, usamos coinlib-sdk para generar una dirección válida
+      //    Derivamos una semilla determinista a partir de la dirección de Privy
+      const seed = `waevo-seed-${embeddedWallet.address.slice(2, 10)}`;
+      
+      const config = {
+        coins: symbol,
+        network: "mainnet",
+        seed: seed,
+      };
+
+      const coinlib = new Coinlib(config);
+      // La dirección se deriva de forma síncrona
+      const address = coinlib.deriveAddressSync(0);
+
       setDepositAddresses(prev => ({ ...prev, [coin.id]: address }));
       setSelectedCoin(coin);
       setModalType("receive");
 
     } catch (error: any) {
-      console.error("Error generando dirección de depósito:", error);
-      
-      // Fallback: Si falla (por ejemplo, porque el plan de Privy no lo soporta),
-      // usamos la dirección EVM para redes compatibles.
-      const evmSymbols = ["ETH", "MATIC", "USDT", "USDC", "BNB", "AVAX", "ARB", "OP", "BASE"];
-      if (evmSymbols.includes(coin.symbol.toUpperCase())) {
-        setDepositAddresses(prev => ({ ...prev, [coin.id]: embeddedWallet.address }));
-        setSelectedCoin(coin);
-        setModalType("receive");
-      } else {
-        alert(`❌ No se pudo generar la dirección para ${coin.name}. Asegúrate de tener activada la función de depósitos en Privy.`);
-      }
+      console.error("Error generando dirección con coinlib-sdk:", error);
+      alert(`❌ No se pudo generar la dirección para ${coin.name}. Error: ${error.message}`);
     } finally {
       setIsGeneratingAddress(false);
     }
@@ -238,16 +184,13 @@ export default function WalletPage() {
       
       return { 
         address: depositAddresses[selectedCoin.id], 
-        network: isEvm ? "Red EVM / Compatible" : `Red ${selectedCoin.name} (Depósito Privy)` 
+        network: isEvm ? "Red EVM / Compatible" : `Red ${selectedCoin.name}` 
       };
     }
     
     return { address: "Generando dirección...", network: "Cargando" };
   };
 
-  // ==========================================
-  // RENDERIZADO
-  // ==========================================
   if (!ready) {
     return (
       <div className="aurora-bg min-h-screen flex items-center justify-center p-6">
@@ -288,7 +231,7 @@ export default function WalletPage() {
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
-        
+        {/* ... (El resto del UI es idéntico al que ya tenías) ... */}
         {/* CABECERA: BALANCE TOTAL */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -392,9 +335,7 @@ export default function WalletPage() {
         )}
       </div>
 
-      {/* ========================================== */}
-      {/* MODAL 1: SELECCIÓN DE ACCIÓN (ENVIAR / RECIBIR) */}
-      {/* ========================================== */}
+      {/* MODAL 1: SELECCIÓN DE ACCIÓN */}
       <AnimatePresence>
         {selectedCoin && !modalType && (
           <motion.div
@@ -451,9 +392,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* ========================================== */}
-      {/* MODAL 2: RECIBIR (DIRECCIÓN REAL Y QR) */}
-      {/* ========================================== */}
+      {/* MODAL 2: RECIBIR (DIRECCIÓN REAL) */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
           <motion.div
@@ -499,7 +438,7 @@ export default function WalletPage() {
               <div className="flex items-start gap-2 mt-4 p-3 rounded-lg bg-amber-500/10 text-amber-400 text-left border border-amber-500/20">
                 <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
                 <p className="text-xs leading-relaxed">
-                  Esta es una dirección de depósito real y persistente generada por Privy. Puedes enviar {selectedCoin.symbol.toUpperCase()} desde cualquier billetera compatible.
+                  Esta es una dirección real y única para {selectedCoin.name}. Asegúrate de enviar {selectedCoin.symbol.toUpperCase()} a través de la red correcta.
                 </p>
               </div>
             </motion.div>
@@ -507,9 +446,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* ========================================== */}
       {/* MODAL 3: ENVIAR (TRANSACCIÓN REAL) */}
-      {/* ========================================== */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <motion.div
