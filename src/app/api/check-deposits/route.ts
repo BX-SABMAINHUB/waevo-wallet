@@ -1,100 +1,83 @@
 import { NextResponse } from 'next/server';
 
-// Mapeo de símbolos a cadenas (el mismo que usamos para generar direcciones)
+// Mapeo de símbolos a cadenas de Tatum (v4 usa nombres como "litecoin-mainnet")
 const CHAIN_MAP: Record<string, string> = {
-  BTC: 'bitcoin', LTC: 'litecoin', DOGE: 'dogecoin', BCH: 'bitcoin-cash',
-  ADA: 'cardano', XRP: 'ripple', SOL: 'solana', DOT: 'polkadot',
-  TRX: 'tron', XLM: 'stellar', XMR: 'monero', ZEC: 'zcash',
-  DASH: 'dash', ETC: 'ethereum-classic', VET: 'vechain',
-  ALGO: 'algorand', NEAR: 'near', ATOM: 'cosmos', FLOW: 'flow', EOS: 'eos',
-  // EVM y tokens
-  ETH: 'ethereum', USDT: 'ethereum', USDC: 'ethereum', DAI: 'ethereum',
-  LINK: 'ethereum', UNI: 'ethereum', SHIB: 'ethereum', PEPE: 'ethereum',
-  MATIC: 'polygon', BNB: 'bsc', AVAX: 'avalanche-c-chain',
-  FTM: 'fantom', ARB: 'arbitrum-one', OP: 'optimism', BASE: 'base',
+  BTC: 'bitcoin-mainnet',
+  LTC: 'litecoin-mainnet',
+  DOGE: 'doge-mainnet',
+  BCH: 'bitcoin-cash-mainnet',
+  ETH: 'ethereum',
+  MATIC: 'polygon',
+  BSC: 'bsc',
+  SOL: 'solana',
+  ADA: 'cardano-mainnet',
+  // Añade más según necesites
 };
 
-// Cadenas que usan el endpoint v4/data/transactions (EVM)
-const EVM_CHAINS = [
-  'ethereum', 'polygon', 'bsc', 'avalanche-c-chain', 'fantom',
-  'arbitrum-one', 'optimism', 'base', 'ethereum-classic'
-];
-
-// Cadenas que usan el endpoint v3/{chain}/transaction/address/{address} (UTXO)
-const UTXO_CHAINS = ['bitcoin', 'litecoin', 'dogecoin', 'bitcoin-cash'];
+// Cadenas que usan el endpoint UTXO v4
+const UTXO_CHAINS = ['bitcoin-mainnet', 'litecoin-mainnet', 'doge-mainnet', 'bitcoin-cash-mainnet', 'cardano-mainnet'];
 
 export async function POST(request: Request) {
   try {
-    const { wallets } = await request.json(); // [{ symbol, address }]
-    if (!Array.isArray(wallets)) {
-      return NextResponse.json({ error: 'Formato inválido' }, { status: 400 });
+    const { symbol, address } = await request.json();
+    if (!symbol || !address) {
+      return NextResponse.json({ error: 'Faltan símbolo o dirección' }, { status: 400 });
     }
 
-    const deposits: any[] = [];
-    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const upperSymbol = symbol.toUpperCase();
+    const chain = CHAIN_MAP[upperSymbol] || 'ethereum'; // Fallback a Ethereum para tokens
 
-    for (const { symbol, address } of wallets) {
-      const upperSymbol = symbol?.toUpperCase();
-      const chain = CHAIN_MAP[upperSymbol] || 'ethereum';
+    let deposits: any[] = [];
 
-      try {
-        let transactions: any[] = [];
+    if (UTXO_CHAINS.includes(chain)) {
+      // --- CONSULTA PARA CADENAS UTXO (Litecoin, Bitcoin, etc.) ---
+      const url = new URL('https://api.tatum.io/v4/data/blockchains/transaction/history/utxos');
+      url.searchParams.append('chain', chain);
+      url.searchParams.append('address', address);
+      url.searchParams.append('pageSize', '50');
+      url.searchParams.append('offset', '0');
+      url.searchParams.append('txType', 'incoming'); // Solo transacciones entrantes
 
-        if (UTXO_CHAINS.includes(chain)) {
-          // --- UTXO (Bitcoin, Litecoin, Dogecoin, Bitcoin Cash) ---
-          const res = await fetch(
-            `https://api.tatum.io/v3/${chain}/transaction/address/${address}`,
-            { headers: { 'x-api-key': process.env.TATUM_API_KEY! } }
-          );
-          if (res.ok) {
-            const data = await res.json();
-            transactions = data.filter((tx: any) => 
-              tx.outputs?.some((out: any) => out.address === address)
-            );
-          }
-        } else if (EVM_CHAINS.includes(chain)) {
-          // --- EVM (Ethereum, Polygon, BSC, etc.) ---
-          const res = await fetch(
-            `https://api.tatum.io/v4/data/transactions?chain=${chain}&addresses=${address}&transactionSubtype=incoming`,
-            { headers: { 'x-api-key': process.env.TATUM_API_KEY! } }
-          );
-          if (res.ok) {
-            const data = await res.json();
-            transactions = data.data || [];
-          }
-        } else {
-          // Otras cadenas (Solana, Cardano, etc.) -> usamos el endpoint v3 genérico
-          const res = await fetch(
-            `https://api.tatum.io/v3/${chain}/transaction/address/${address}`,
-            { headers: { 'x-api-key': process.env.TATUM_API_KEY! } }
-          );
-          if (res.ok) {
-            const data = await res.json();
-            transactions = Array.isArray(data) ? data : [];
-          }
-        }
+      const res = await fetch(url.toString(), {
+        headers: { 'x-api-key': process.env.TATUM_API_KEY! },
+      });
 
-        // Filtrar transacciones recientes y determinar estado
-        for (const tx of transactions) {
-          const txTime = tx.timestamp ? tx.timestamp * 1000 : Date.now();
-          if (txTime < sevenDaysAgo) continue;
+      if (res.ok) {
+        const data = await res.json();
+        // La respuesta v4 suele ser un array de transacciones
+        deposits = (Array.isArray(data) ? data : data.data || []).map((tx: any) => ({
+          symbol: upperSymbol,
+          amount: tx.value || tx.amount || '0',
+          hash: tx.hash || tx.txId,
+          status: tx.confirmations > 0 ? 'confirmed' : 'pending',
+          confirmations: tx.confirmations || 0,
+          timestamp: tx.timestamp ? tx.timestamp * 1000 : Date.now(),
+        }));
+      } else {
+        const errorBody = await res.text();
+        console.error(`Error UTXO v4 para ${chain}:`, errorBody);
+      }
+    } else {
+      // --- CONSULTA PARA EVM (Ethereum, Polygon, BSC, etc.) ---
+      const url = new URL('https://api.tatum.io/v4/data/transactions');
+      url.searchParams.append('chain', chain);
+      url.searchParams.append('addresses', address);
+      url.searchParams.append('transactionSubtype', 'incoming');
 
-          const confirmations = tx.confirmations ?? 0;
-          const status = confirmations > 0 ? 'confirmed' : 'pending';
+      const res = await fetch(url.toString(), {
+        headers: { 'x-api-key': process.env.TATUM_API_KEY! },
+      });
 
-          deposits.push({
-            symbol: upperSymbol,
-            name: symbol,
-            amount: tx.amount || tx.value || '0',
-            hash: tx.hash || tx.txId,
-            status,
-            confirmations,
-            timestamp: txTime,
-          });
-        }
-      } catch (err) {
-        console.error(`Error consultando ${upperSymbol}:`, err);
-        // Continuamos con las demás monedas
+      if (res.ok) {
+        const data = await res.json();
+        deposits = (data.data || []).map((tx: any) => ({
+          symbol: upperSymbol,
+          amount: tx.amount || tx.value || '0',
+          hash: tx.hash,
+          status: tx.confirmations > 0 ? 'confirmed' : 'pending',
+          confirmations: tx.confirmations || 0,
+          timestamp: tx.timestamp ? tx.timestamp * 1000 : Date.now(),
+        }));
       }
     }
 
