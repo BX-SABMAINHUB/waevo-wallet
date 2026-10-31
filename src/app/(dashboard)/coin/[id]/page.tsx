@@ -10,8 +10,7 @@ interface CoinPageProps {
 export default function CoinPage({ params }: CoinPageProps) {
   const { id } = use(params);
 
-  // TradingView usa un formato específico para los pares (ej. BINANCE:BTCUSDT)
-  // Hacemos una pequeña conversión para que funcione con el ID de CoinGecko
+  // Mapeo para que las monedas más populares se vean correctamente en TradingView
   const symbolMap: Record<string, string> = {
     bitcoin: "BINANCE:BTCUSDT",
     ethereum: "BINANCE:ETHUSDT",
@@ -19,9 +18,12 @@ export default function CoinPage({ params }: CoinPageProps) {
     cardano: "BINANCE:ADAUSDT",
     ripple: "BINANCE:XRPUSDT",
     dogecoin: "BINANCE:DOGEUSDT",
+    polkadot: "BINANCE:DOTUSDT",
+    chainlink: "BINANCE:LINKUSDT",
+    avalanche: "BINANCE:AVAXUSDT",
+    polygon: "BINANCE:MATICUSDT",
   };
 
-  // Si la moneda está en el mapa, la usamos. Si no, intentamos un formato genérico.
   const tradingViewSymbol = symbolMap[id.toLowerCase()] || `BINANCE:${id.toUpperCase()}USDT`;
 
   return (
@@ -31,7 +33,7 @@ export default function CoinPage({ params }: CoinPageProps) {
           {id.replace(/-/g, " ")}
         </h1>
         <div className="rounded-2xl glass p-2 md:p-4 overflow-hidden">
-          {/* Aquí se renderiza el widget gigante de TradingView */}
+          {/* El gráfico de TradingView se carga aquí */}
           <TradingViewWidget symbol={tradingViewSymbol} />
         </div>
       </div>
