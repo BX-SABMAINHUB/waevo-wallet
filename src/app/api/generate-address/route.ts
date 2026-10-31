@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 
-// Mapeo exhaustivo de símbolos a las redes de Tatum
-const TATUM_CHAIN_MAP: Record<string, string> = {
+const NATIVE_CHAINS: Record<string, string> = {
   BTC: 'bitcoin',
   LTC: 'litecoin',
   DOGE: 'dogecoin',
@@ -22,22 +21,6 @@ const TATUM_CHAIN_MAP: Record<string, string> = {
   ATOM: 'cosmos',
   FLOW: 'flow',
   EOS: 'eos',
-  // Redes EVM y Tokens
-  ETH: 'ethereum',
-  USDT: 'ethereum',
-  USDC: 'ethereum',
-  DAI: 'ethereum',
-  LINK: 'ethereum',
-  UNI: 'ethereum',
-  SHIB: 'ethereum',
-  PEPE: 'ethereum',
-  MATIC: 'polygon',
-  BNB: 'bsc',
-  AVAX: 'avalanche-c-chain',
-  FTM: 'fantom',
-  ARB: 'arbitrum-one',
-  OP: 'optimism',
-  BASE: 'base'
 };
 
 export async function POST(request: Request) {
@@ -45,10 +28,9 @@ export async function POST(request: Request) {
     const { symbol } = await request.json();
     const upperSymbol = symbol?.toUpperCase();
     
-    // Buscamos la cadena en Tatum. Si no está, usamos 'ethereum' como fallback.
-    const chain = TATUM_CHAIN_MAP[upperSymbol] || 'ethereum';
+    // Si es una red nativa, usamos su cadena. Si es un token, usamos Ethereum.
+    const chain = NATIVE_CHAINS[upperSymbol] || 'ethereum';
 
-    // 1. Generar una wallet HD (xpub) para esta cadena
     const walletRes = await fetch(`https://api.tatum.io/v3/${chain}/wallet`, {
       method: 'GET',
       headers: { 'x-api-key': process.env.TATUM_API_KEY! },
@@ -57,9 +39,17 @@ export async function POST(request: Request) {
     if (!walletRes.ok) throw new Error('Error generando wallet en Tatum');
     const walletData = await walletRes.json();
 
-    // 2. Derivar una dirección ÚNICA usando el timestamp actual como índice.
-    // Esto garantiza que cada vez que pidas una dirección para USDT o ETH, sea diferente.
-    const index = Date.now();
+    // Para que cada moneda tenga una dirección ÚNICA:
+    // Si es una red nativa, usamos el timestamp. 
+    // Si es un token, usamos un hash del símbolo para que sea determinista y único por moneda.
+    let index: number;
+    if (NATIVE_CHAINS[upperSymbol]) {
+      index = Date.now();
+    } else {
+      // Generamos un número a partir del símbolo (ej. SHIB -> 123456)
+      index = upperSymbol.split('').reduce((acc: number, char: string) => acc + char.charCodeAt(0), 0) * 1000;
+    }
+
     const addressRes = await fetch(
       `https://api.tatum.io/v3/${chain}/address/${walletData.xpub}/${index}`,
       {
