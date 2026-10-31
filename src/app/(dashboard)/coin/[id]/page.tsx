@@ -1,23 +1,12 @@
-"use client";
-
-import { use } from "react";
-import dynamic from "next/dynamic";
-
-const ChartWrapper = dynamic(
-  () => import("@/components/charts/ChartWrapper").then((mod) => mod.ChartWrapper),
-  {
-    ssr: false,
-    loading: () => <div className="h-[400px] w-full animate-pulse rounded-xl bg-slate-800/50" />,
-  }
-);
+import { ChartSection } from "@/components/charts/ChartSection";
 
 interface CoinPageProps {
   params: Promise<{ id: string }>;
 }
 
-export default function CoinPage({ params }: CoinPageProps) {
-  // Usamos el hook 'use' de React para desenvolver los params en un Client Component
-  const { id } = use(params);
+export default async function CoinPage({ params }: CoinPageProps) {
+  // Await directo porque es un Server Component
+  const { id } = await params;
 
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
@@ -26,7 +15,8 @@ export default function CoinPage({ params }: CoinPageProps) {
           {id.replace(/-/g, " ")}
         </h1>
         <div className="rounded-2xl glass p-4 md:p-6">
-          <ChartWrapper coinId={id} />
+          {/* Usamos ChartSection, que es un Client Component */}
+          <ChartSection coinId={id} />
         </div>
       </div>
     </div>
