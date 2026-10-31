@@ -6,7 +6,17 @@ import { createPublicClient, http, formatEther, parseEther } from "viem";
 import { mainnet } from "viem/chains";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
-import { Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, ShieldCheck } from "lucide-react";
+import { 
+  Search, 
+  ArrowDownLeft, 
+  ArrowUpRight, 
+  X, 
+  Copy, 
+  CheckCircle2, 
+  ShieldCheck, 
+  Wallet,
+  AlertCircle
+} from "lucide-react";
 
 interface Coin {
   id: string;
@@ -17,7 +27,7 @@ interface Coin {
 }
 
 export default function WalletPage() {
-  const { ready } = usePrivy();
+  const { ready, authenticated, login } = usePrivy();
   const { wallets } = useWallets();
   const { sendTransaction } = useSendTransaction();
 
@@ -36,14 +46,18 @@ export default function WalletPage() {
   const [sendAmount, setSendAmount] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [selectedNetwork, setSelectedNetwork] = useState("Ethereum");
 
-  // 1. Obtener la billetera de Privy y su dirección real
+  // 1. Obtener la billetera de Privy
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const userAddress = embeddedWallet?.address;
 
   // 2. Consultar el saldo real on-chain con viem
   useEffect(() => {
-    if (!userAddress) return;
+    if (!userAddress) {
+      setIsBalanceLoading(false);
+      return;
+    }
 
     const fetchBalance = async () => {
       setIsBalanceLoading(true);
@@ -69,7 +83,7 @@ export default function WalletPage() {
     fetchBalance();
   }, [userAddress]);
 
-  // Cargar monedas para el listado
+  // Cargar monedas
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -93,7 +107,7 @@ export default function WalletPage() {
       coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
-  // 3. Enviar transacción REAL con Privy
+  // 3. Enviar transacción REAL
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!embeddedWallet || !selectedCoin) return;
@@ -107,12 +121,12 @@ export default function WalletPage() {
         value: valueInWei,
       });
 
-      alert(`✅ Transacción enviada con éxito. Hash: ${hash}`);
+      alert(`✅ Transacción enviada. Hash: ${hash}`);
       setModalType(null);
       setSendAddress("");
       setSendAmount("");
       
-      // Refrescamos el saldo después de enviar
+      // Refrescar saldo
       if (userAddress) {
         const client = createPublicClient({ chain: mainnet, transport: http() });
         const balanceWei = await client.getBalance({ address: userAddress as `0x${string}` });
@@ -120,16 +134,10 @@ export default function WalletPage() {
       }
     } catch (error: any) {
       console.error("Error al enviar:", error);
-      alert(`❌ Error al enviar: ${error.message || "Revisa tu conexión o saldo"}`);
+      alert(`❌ Error: ${error.message || "Revisa tu conexión o saldo"}`);
     } finally {
       setIsSending(false);
     }
-  };
-
-  // 4. Abrir modal de recibir (usando la dirección real de la billetera)
-  const handleReceive = () => {
-    if (!embeddedWallet) return;
-    setModalType("receive");
   };
 
   const copyToClipboard = () => {
@@ -140,13 +148,39 @@ export default function WalletPage() {
     }
   };
 
-  // Saldo total en USD (ETH por ahora)
   const totalUsd = useMemo(() => {
     const ethPrice = coins.find((c) => c.id === "ethereum")?.current_price || 0;
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
-  if (!ready) return <div className="p-10 text-center text-white">Cargando billetera segura...</div>;
+  if (!ready) return <div className="p-10 text-center text-white">Cargando...</div>;
+
+  // SI PRIVY NO ESTÁ AUTENTICADO, MOSTRAMOS UN BOTÓN PARA ACTIVAR LA BILLETERA
+  if (!authenticated || !embeddedWallet) {
+    return (
+      <div className="aurora-bg min-h-screen flex items-center justify-center p-6">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="max-w-md w-full rounded-3xl border border-indigo-500/30 bg-slate-900/80 p-8 text-center backdrop-blur-xl"
+        >
+          <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-indigo-500/20 text-indigo-400">
+            <Wallet size={40} />
+          </div>
+          <h2 className="text-2xl font-bold text-white mb-2">Activa tu Billetera Cripto</h2>
+          <p className="text-sm text-slate-400 mb-8">
+            Para empezar a enviar y recibir criptomonedas, necesitas crear tu billetera segura. Es gratis y solo tarda un segundo.
+          </p>
+          <button
+            onClick={login}
+            className="w-full rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-400 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:scale-[1.02]"
+          >
+            Crear mi Billetera Segura
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
 
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
@@ -178,7 +212,7 @@ export default function WalletPage() {
                 className="mt-3 flex items-center gap-2 text-xs text-slate-400 hover:text-white transition"
               >
                 {copied ? <CheckCircle2 size={14} className="text-emerald-400" /> : <Copy size={14} />}
-                {userAddress ? `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}` : "Conectando..."}
+                {userAddress.slice(0, 6)}...{userAddress.slice(-4)}
               </button>
             </div>
           </div>
@@ -213,7 +247,6 @@ export default function WalletPage() {
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {filteredCoins.map((coin) => {
               const isEth = coin.id === "ethereum";
-              // Si no es ETH o el saldo es 0, mostramos 0.0000
               const balanceDisplay = isEth ? parseFloat(nativeBalance).toFixed(4) : "0.0000";
               
               return (
@@ -277,7 +310,7 @@ export default function WalletPage() {
               
               <div className="grid grid-cols-2 gap-4">
                 <button
-                  onClick={handleReceive}
+                  onClick={() => setModalType("receive")}
                   className="flex flex-col items-center justify-center gap-2 rounded-2xl bg-slate-800 p-6 hover:bg-slate-700 transition"
                 >
                   <div className="h-12 w-12 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
@@ -300,7 +333,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* MODAL DE RECIBIR (DIRECCIÓN REAL) */}
+      {/* MODAL DE RECIBIR */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
           <motion.div
@@ -321,34 +354,44 @@ export default function WalletPage() {
                 <X size={24} />
               </button>
               <h3 className="text-2xl font-bold text-white mb-2">Recibir {selectedCoin.name}</h3>
-              <p className="text-sm text-slate-400 mb-6">
-                Esta es tu dirección real de {selectedCoin.symbol.toUpperCase()} en la red Ethereum.
-              </p>
               
-              {userAddress ? (
-                <>
-                  <div className="bg-white p-4 rounded-2xl inline-block mb-6">
-                    <QRCodeSVG value={userAddress} size={200} />
-                  </div>
-                  <div className="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3">
-                    <span className="text-sm font-mono text-slate-300 truncate">{userAddress}</span>
-                    <button onClick={copyToClipboard} className="text-indigo-400 hover:text-indigo-300 flex-shrink-0">
-                      {copied ? <CheckCircle2 size={20} className="text-emerald-400" /> : <Copy size={20} />}
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <p className="text-red-400">No se pudo cargar la dirección de la billetera.</p>
-              )}
-              <p className="text-xs text-slate-500 mt-4">
-                Envía únicamente {selectedCoin.symbol.toUpperCase()} a esta dirección.
-              </p>
+              {/* Selector de red para claridad */}
+              <div className="mb-6">
+                <select
+                  value={selectedNetwork}
+                  onChange={(e) => setSelectedNetwork(e.target.value)}
+                  className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2 px-3 text-sm text-white outline-none focus:border-indigo-500 text-center"
+                >
+                  <option value="Ethereum">Red Ethereum (ERC-20)</option>
+                  <option value="Polygon">Red Polygon</option>
+                  <option value="Base">Red Base</option>
+                  <option value="Arbitrum">Red Arbitrum</option>
+                </select>
+              </div>
+
+              <div className="bg-white p-4 rounded-2xl inline-block mb-6">
+                <QRCodeSVG value={userAddress} size={200} />
+              </div>
+              
+              <div className="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3">
+                <span className="text-sm font-mono text-slate-300 truncate">{userAddress}</span>
+                <button onClick={copyToClipboard} className="text-indigo-400 hover:text-indigo-300 flex-shrink-0">
+                  {copied ? <CheckCircle2 size={20} className="text-emerald-400" /> : <Copy size={20} />}
+                </button>
+              </div>
+              
+              <div className="flex items-start gap-2 mt-4 p-3 rounded-lg bg-amber-500/10 text-amber-400 text-left">
+                <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
+                <p className="text-xs">
+                  Esta es tu dirección EVM. Asegúrate de enviar {selectedCoin.symbol.toUpperCase()} a través de la red <strong>{selectedNetwork}</strong>.
+                </p>
+              </div>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* MODAL DE ENVIAR (TRANSACCIÓN REAL) */}
+      {/* MODAL DE ENVIAR */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <motion.div
@@ -386,6 +429,20 @@ export default function WalletPage() {
                 </div>
 
                 <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Red</label>
+                  <select
+                    value={selectedNetwork}
+                    onChange={(e) => setSelectedNetwork(e.target.value)}
+                    className="w-full rounded-xl border border-slate-700 bg-slate-800 py-3 px-4 text-sm text-white outline-none focus:border-indigo-500 appearance-none"
+                  >
+                    <option value="Ethereum">Ethereum</option>
+                    <option value="Polygon">Polygon</option>
+                    <option value="Base">Base</option>
+                    <option value="Arbitrum">Arbitrum</option>
+                  </select>
+                </div>
+
+                <div>
                   <label className="block text-xs font-medium text-slate-400 mb-1">Cantidad</label>
                   <input
                     type="number"
@@ -404,7 +461,7 @@ export default function WalletPage() {
                     disabled={isSending}
                     className="w-full rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-400 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 disabled:opacity-60 transition hover:scale-[1.02]"
                   >
-                    {isSending ? "Firmando y enviando..." : "Confirmar Envío Real"}
+                    {isSending ? "Firmando y enviando..." : "Confirmar Envío"}
                   </button>
                 </div>
               </form>
