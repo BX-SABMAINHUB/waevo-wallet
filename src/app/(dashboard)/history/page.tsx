@@ -1,14 +1,14 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useWallets, usePrivy } from "@privy-io/react-auth";
+import { usePrivy } from "@privy-io/react-auth";
 import { motion, AnimatePresence } from "@/components/motion-client";
 import { auth } from "@/lib/firebase";
 import { 
   RefreshCw, CheckCircle2, Clock, Wallet, Loader2, 
   AlertCircle, Search, ChevronDown, ExternalLink, 
   ArrowDownLeft, ShieldCheck, Zap, Activity, Copy, X,
-  TrendingUp, TrendingDown
+  TrendingUp
 } from "lucide-react";
 
 interface Coin {
@@ -27,18 +27,17 @@ interface Deposit {
   timestamp: number;
 }
 
-// Configuración de tiempos y confirmaciones por red
+// Configuración de tiempos por red para estimar el tiempo restante
 const NETWORK_CONFIG: Record<string, { requiredConf: number, blockTimeMins: number }> = {
   BTC: { requiredConf: 3, blockTimeMins: 10 },
-  LTC: { requiredConf: 6, blockTimeMins: 2.5 },
+  LTC: { requiredConf: 3, blockTimeMins: 2.5 },
   DOGE: { requiredConf: 6, blockTimeMins: 1 },
   ETH: { requiredConf: 12, blockTimeMins: 0.2 },
-  DEFAULT: { requiredConf: 6, blockTimeMins: 5 }
+  DEFAULT: { requiredConf: 3, blockTimeMins: 5 }
 };
 
 export default function HistoryPage() {
   const { ready } = usePrivy();
-  const { wallets } = useWallets();
   const uid = auth.currentUser?.uid || "";
 
   const [coins, setCoins] = useState<Coin[]>([]);
@@ -48,12 +47,13 @@ export default function HistoryPage() {
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const [deposits, setDeposits] = useState<Deposit[]>([]);
+  const [balance, setBalance] = useState<string>('0');
   const [checking, setChecking] = useState(false);
   const [checked, setChecked] = useState(false);
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
 
-  // Estados para el Modal de Transacción
+  // Estados para el Modal
   const [selectedTx, setSelectedTx] = useState<Deposit | null>(null);
   const [isTxModalOpen, setIsTxModalOpen] = useState(false);
   const [copiedHash, setCopiedHash] = useState(false);
@@ -74,42 +74,25 @@ export default function HistoryPage() {
     fetchCoins();
   }, []);
 
-  // 2. Cerrar dropdown al hacer clic fuera
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setIsDropdownOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
-
-  // 3. Polling automático para actualizar la transacción seleccionada
+  // 2. Polling automático cada 15s si el modal está abierto y hay transacciones pendientes
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isTxModalOpen && selectedTx && selectedTx.status === 'pending') {
       interval = setInterval(() => {
-        // Volver a consultar los depósitos
         fetchDeposits();
-      }, 10000); // Cada 10 segundos
+      }, 15000); 
     }
     return () => clearInterval(interval);
   }, [isTxModalOpen, selectedTx]);
 
-  const filteredCoins = coins.filter(
-    (coin) =>
-      coin.name.toLowerCase().includes(search.toLowerCase()) ||
-      coin.symbol.toLowerCase().includes(search.toLowerCase())
-  );
-
-  // 4. Seleccionar moneda y generar dirección
+  // 3. Generar dirección (misma lógica que antes)
   const handleSelectCoin = async (coin: Coin) => {
     setSelectedCoin(coin);
     setIsDropdownOpen(false);
     setSearch("");
     setDeposits([]);
     setChecked(false);
+    setBalance('0');
 
     if (depositAddresses[coin.id] || !uid) return;
 
@@ -135,7 +118,7 @@ export default function HistoryPage() {
     }
   };
 
-  // 5. Obtener depósitos y actualizar el estado
+  // 4. Consultar depósitos y saldo real
   const fetchDeposits = async () => {
     if (!selectedCoin || !depositAddresses[selectedCoin.id]) return;
     
@@ -150,8 +133,10 @@ export default function HistoryPage() {
         }),
       });
       const data = await res.json();
-      setDeposits(data.deposits || []);
       
+      setDeposits(data.deposits || []);
+      setBalance(data.balance || '0'); // Actualizamos el saldo real
+
       // Si el modal está abierto, actualizamos la transacción seleccionada
       if (selectedTx && data.deposits) {
         const updatedTx = data.deposits.find((d: Deposit) => d.hash === selectedTx.hash);
@@ -170,18 +155,13 @@ export default function HistoryPage() {
     fetchDeposits();
   };
 
-  const handleOpenTxModal = (tx: Deposit) => {
-    setSelectedTx(tx);
-    setIsTxModalOpen(true);
-  };
-
   const copyHash = (hash: string) => {
     navigator.clipboard.writeText(hash);
     setCopiedHash(true);
     setTimeout(() => setCopiedHash(false), 2000);
   };
 
-  // 6. Calcular progreso y tiempo estimado
+  // 5. Calcular progreso para el modal
   const getTxDetails = (tx: Deposit) => {
     const symbol = tx.symbol.toUpperCase();
     const config = NETWORK_CONFIG[symbol] || NETWORK_CONFIG.DEFAULT;
@@ -205,18 +185,12 @@ export default function HistoryPage() {
     return { progressPercentage, timeString, remainingConf, requiredConf, currentConf };
   };
 
-  // 7. Calcular saldo total recibido (solo confirmados)
-  const totalReceived = deposits
-    .filter(d => d.status === 'confirmed')
-    .reduce((acc, d) => acc + parseFloat(d.amount), 0);
-
   if (!ready) return <div className="p-10 text-white">Cargando...</div>;
 
   const currentAddress = selectedCoin ? depositAddresses[selectedCoin.id] : null;
 
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10 relative overflow-hidden">
-      
       <motion.div 
         animate={{ scale: [1, 1.2, 1], opacity: [0.1, 0.2, 0.1] }} 
         transition={{ duration: 8, repeat: Infinity }}
@@ -228,29 +202,27 @@ export default function HistoryPage() {
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold text-white mb-2">Ingresos y Historial</h1>
-            <p className="text-slate-400 text-sm">Selecciona una moneda y verifica si has recibido fondos on-chain.</p>
+            <p className="text-slate-400 text-sm">Datos en tiempo real desde Blockchair.</p>
           </div>
-          {/* Saldo total recibido */}
+          {/* Saldo real actualizado */}
           {selectedCoin && (
             <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex items-center gap-4">
               <div className="h-10 w-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-400">
                 <TrendingUp size={20} />
               </div>
               <div>
-                <p className="text-xs text-slate-400">Saldo Recibido</p>
+                <p className="text-xs text-slate-400">Saldo Confirmado</p>
                 <p className="text-xl font-bold text-white">
-                  {totalReceived.toFixed(4)} {selectedCoin.symbol.toUpperCase()}
+                  {balance} {selectedCoin.symbol.toUpperCase()}
                 </p>
               </div>
             </div>
           )}
         </motion.div>
 
-        {/* PANEL DE CONTROL */}
+        {/* Panel de control (selector y botón) - idéntico al anterior */}
         <div className="mb-8 rounded-3xl border border-slate-800 bg-slate-900/50 p-6 backdrop-blur-xl shadow-2xl">
           <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
-            
-            {/* Selector de Moneda */}
             <div className="relative w-full md:w-80" ref={dropdownRef}>
               <div 
                 onClick={() => setIsDropdownOpen(!isDropdownOpen)}
@@ -274,33 +246,17 @@ export default function HistoryPage() {
               <AnimatePresence>
                 {isDropdownOpen && (
                   <motion.div 
-                    initial={{ opacity: 0, y: -10 }} 
-                    animate={{ opacity: 1, y: 0 }} 
-                    exit={{ opacity: 0, y: -10 }}
+                    initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}
                     className="absolute z-50 mt-2 w-full rounded-xl border border-slate-700 bg-slate-800 shadow-2xl overflow-hidden"
                   >
                     <div className="p-2 border-b border-slate-700">
-                      <input
-                        type="text"
-                        autoFocus
-                        placeholder="Escribe el nombre o símbolo..."
-                        value={search}
-                        onChange={(e) => setSearch(e.target.value)}
-                        className="w-full bg-transparent text-sm text-white placeholder-slate-400 outline-none px-2 py-1"
-                      />
+                      <input type="text" autoFocus placeholder="Buscar..." value={search} onChange={(e) => setSearch(e.target.value)} className="w-full bg-transparent text-sm text-white outline-none px-2 py-1" />
                     </div>
-                    <div className="max-h-60 overflow-y-auto custom-scrollbar">
-                      {filteredCoins.map((coin) => (
-                        <div
-                          key={coin.id}
-                          onClick={() => handleSelectCoin(coin)}
-                          className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-slate-700 transition"
-                        >
+                    <div className="max-h-60 overflow-y-auto">
+                      {coins.filter(c => c.name.toLowerCase().includes(search.toLowerCase()) || c.symbol.toLowerCase().includes(search.toLowerCase())).map((coin) => (
+                        <div key={coin.id} onClick={() => handleSelectCoin(coin)} className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-slate-700">
                           <img src={coin.image} alt={coin.name} className="h-6 w-6 rounded-full" />
-                          <div>
-                            <p className="text-sm font-medium text-white">{coin.name}</p>
-                            <p className="text-xs text-slate-400">{coin.symbol.toUpperCase()}</p>
-                          </div>
+                          <div><p className="text-sm font-medium text-white">{coin.name}</p><p className="text-xs text-slate-400">{coin.symbol.toUpperCase()}</p></div>
                         </div>
                       ))}
                     </div>
@@ -312,84 +268,55 @@ export default function HistoryPage() {
             <button
               onClick={handleCheckDeposits}
               disabled={!selectedCoin || isGeneratingAddress || checking}
-              className="flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-400 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:scale-[1.02] disabled:opacity-50 disabled:hover:scale-100 w-full md:w-auto"
+              className="flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-400 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:scale-[1.02] disabled:opacity-50 w-full md:w-auto"
             >
               {checking ? <Loader2 className="animate-spin" size={18} /> : <RefreshCw size={18} />}
               {checking ? 'Verificando...' : 'Verificar ingresos'}
             </button>
           </div>
 
-          {/* Dirección de la billetera */}
           {selectedCoin && (
             <div className="mt-4 flex items-center gap-2 text-xs text-slate-400 bg-slate-950/50 p-3 rounded-lg border border-slate-800/50">
-              <Wallet size={14} className="text-indigo-400 flex-shrink-0" />
-              <span className="truncate">
-                {isGeneratingAddress ? (
-                  "Generando dirección..."
-                ) : currentAddress ? (
-                  <>Billetera: <span className="font-mono text-slate-300">{currentAddress}</span></>
-                ) : (
-                  "Error al generar dirección"
-                )}
-              </span>
+              <Wallet size={14} className="text-indigo-400" />
+              <span className="truncate">Billetera: <span className="font-mono text-slate-300">{currentAddress}</span></span>
             </div>
           )}
         </div>
 
-        {/* RESULTADOS */}
+        {/* Lista de transacciones */}
         <AnimatePresence>
           {checked && !checking && deposits.length === 0 && (
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
-              className="flex flex-col items-center justify-center p-10 bg-slate-900/40 rounded-3xl border border-slate-800"
-            >
-              <div className="h-16 w-16 bg-slate-800 rounded-full flex items-center justify-center mb-4">
-                <AlertCircle size={32} className="text-slate-500" />
-              </div>
-              <h3 className="text-lg font-semibold text-white">No se detectó nada</h3>
-              <p className="text-sm text-slate-400 mt-1">No hay transacciones recientes para esta billetera.</p>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center p-10 bg-slate-900/40 rounded-3xl border border-slate-800">
+              <AlertCircle size={32} className="text-slate-500 mb-4" />
+              <h3 className="text-lg font-semibold text-white">No se detectaron transacciones</h3>
             </motion.div>
           )}
 
           {deposits.length > 0 && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
-              <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-                <Activity size={20} className="text-indigo-400" /> Transacciones Detectadas
-              </h2>
               {deposits.map((d, i) => (
                 <motion.div 
                   key={i}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.1 }}
+                  initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.1 }}
                   className="group relative overflow-hidden rounded-2xl bg-slate-900/80 p-5 border border-slate-700 hover:border-indigo-500/50 transition-all cursor-pointer"
-                  onClick={() => handleOpenTxModal(d)}
+                  onClick={() => { setSelectedTx(d); setIsTxModalOpen(true); }}
                 >
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 relative z-10">
+                  <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4">
-                      <div className={`h-12 w-12 rounded-2xl flex items-center justify-center ${
-                        d.status === 'confirmed' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400 animate-pulse'
-                      }`}>
+                      <div className={`h-12 w-12 rounded-2xl flex items-center justify-center ${d.status === 'confirmed' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400 animate-pulse'}`}>
                         {d.status === 'confirmed' ? <CheckCircle2 size={24} /> : <Clock size={24} />}
                       </div>
                       <div>
                         <p className="text-lg font-bold text-white flex items-center gap-2">
-                          Recibiendo {d.amount} <span className="text-indigo-400">{d.symbol}</span>
+                          +{d.amount} <span className="text-indigo-400">{d.symbol}</span>
                         </p>
                         <p className="text-sm text-slate-400">
-                          {d.status === 'confirmed' 
-                            ? 'Confirmado y añadido al saldo' 
-                            : `Procesando (${d.confirmations} confirmaciones)`}
+                          {d.status === 'confirmed' ? 'Confirmado en la blockchain' : `${d.confirmations} confirmaciones`}
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end">
-                      <span className="text-xs text-indigo-400 font-medium group-hover:underline flex items-center gap-1">
-                        Ver detalles <ChevronDown size={14} className="group-hover:translate-y-1 transition-transform" />
-                      </span>
-                    </div>
+                    <span className="text-xs text-indigo-400 group-hover:underline flex items-center gap-1">Ver detalles <ChevronDown size={14} /></span>
                   </div>
-                  <div className="absolute inset-0 bg-gradient-to-r from-indigo-500/0 via-indigo-500/5 to-indigo-500/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000" />
                 </motion.div>
               ))}
             </motion.div>
@@ -397,133 +324,78 @@ export default function HistoryPage() {
         </AnimatePresence>
       </div>
 
-      {/* MODAL DETALLADO DE TRANSACCIÓN */}
+      {/* MODAL DETALLADO */}
       <AnimatePresence>
         {isTxModalOpen && selectedTx && (
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-4"
             onClick={() => setIsTxModalOpen(false)}
           >
             <motion.div
-              initial={{ scale: 0.9, y: 50, opacity: 0 }}
-              animate={{ scale: 1, y: 0, opacity: 1 }}
-              exit={{ scale: 0.9, y: 50, opacity: 0 }}
+              initial={{ scale: 0.9, y: 50, opacity: 0 }} animate={{ scale: 1, y: 0, opacity: 1 }} exit={{ scale: 0.9, y: 50, opacity: 0 }}
               transition={{ type: "spring", damping: 25, stiffness: 300 }}
               onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-lg rounded-[2rem] border border-slate-700/50 bg-gradient-to-b from-slate-900 to-slate-950 p-1 shadow-2xl overflow-hidden relative"
+              className="w-full max-w-lg rounded-[2rem] border border-slate-700/50 bg-gradient-to-b from-slate-900 to-slate-950 p-6 shadow-2xl relative"
             >
-              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3/4 h-1 bg-gradient-to-r from-transparent via-indigo-500 to-transparent opacity-50" />
-
-              <div className="p-6 sm:p-8">
-                {/* Cabecera */}
-                <div className="flex justify-between items-start mb-8">
-                  <div className="flex items-center gap-4">
-                    <div className="h-14 w-14 rounded-full bg-indigo-500/10 flex items-center justify-center text-indigo-400 border border-indigo-500/20 shadow-[0_0_20px_rgba(99,102,241,0.2)]">
-                      <ArrowDownLeft size={28} />
-                    </div>
-                    <div>
-                      <h3 className="text-2xl font-bold text-white">Depósito Recibido</h3>
-                      <p className="text-sm text-slate-400">Resumen de la transacción</p>
-                    </div>
+              <div className="flex justify-between items-start mb-8">
+                <div className="flex items-center gap-4">
+                  <div className="h-14 w-14 rounded-full bg-indigo-500/10 flex items-center justify-center text-indigo-400 border border-indigo-500/20">
+                    <ArrowDownLeft size={28} />
                   </div>
-                  <button 
-                    onClick={() => setIsTxModalOpen(false)}
-                    className="h-10 w-10 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 transition"
-                  >
-                    <X size={20} />
-                  </button>
-                </div>
-
-                {/* Monto y Estado */}
-                <div className="text-center mb-8">
-                  <motion.div 
-                    initial={{ scale: 0.5, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    transition={{ delay: 0.2, type: "spring" }}
-                    className="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400 mb-2"
-                  >
-                    +{selectedTx.amount} <span className="text-3xl text-indigo-400">{selectedTx.symbol}</span>
-                  </motion.div>
-                  <div className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-semibold ${
-                    selectedTx.status === 'confirmed' 
-                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
-                      : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                  }`}>
-                    {selectedTx.status === 'confirmed' ? <ShieldCheck size={14} /> : <Loader2 size={14} className="animate-spin" />}
-                    {selectedTx.status === 'confirmed' ? 'Añadido al saldo' : 'Esperando Confirmaciones'}
+                  <div>
+                    <h3 className="text-2xl font-bold text-white">Depósito Recibido</h3>
+                    <p className="text-sm text-slate-400">Detalles en tiempo real</p>
                   </div>
                 </div>
-
-                {/* Barra de Progreso */}
-                {selectedTx.status === 'pending' && (
-                  <div className="mb-8 bg-slate-900/80 rounded-2xl p-5 border border-slate-800">
-                    <div className="flex justify-between text-xs font-medium mb-3">
-                      <span className="text-slate-400">Progreso de la red</span>
-                      <span className="text-indigo-400 font-bold">
-                        {getTxDetails(selectedTx).currentConf} / {getTxDetails(selectedTx).requiredConf} confirmaciones
-                      </span>
-                    </div>
-                    
-                    <div className="h-3 w-full bg-slate-800 rounded-full overflow-hidden">
-                      <motion.div 
-                        initial={{ width: 0 }}
-                        animate={{ width: `${getTxDetails(selectedTx).progressPercentage}%` }}
-                        transition={{ duration: 1, ease: "easeOut" }}
-                        className="h-full bg-gradient-to-r from-indigo-500 to-cyan-400 relative"
-                      >
-                        <div className="absolute inset-0 bg-white/20 animate-pulse" />
-                      </motion.div>
-                    </div>
-                    
-                    <div className="flex justify-between items-center mt-3">
-                      <p className="text-xs text-slate-500 flex items-center gap-1">
-                        <Clock size={12} /> Tiempo est.: {getTxDetails(selectedTx).timeString}
-                      </p>
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); fetchDeposits(); }}
-                        disabled={checking}
-                        className="text-xs flex items-center gap-1 text-indigo-400 hover:text-indigo-300 transition"
-                      >
-                        <RefreshCw size={12} className={checking ? "animate-spin" : ""} /> Actualizar
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Detalles Técnicos */}
-                <div className="space-y-3 bg-slate-900/50 rounded-2xl p-4 border border-slate-800">
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-slate-400 flex items-center gap-2"><Zap size={14} /> Red</span>
-                    <span className="text-white font-medium">{selectedTx.symbol}</span>
-                  </div>
-                  <div className="h-px w-full bg-slate-800" />
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-slate-400 flex items-center gap-2"><Activity size={14} /> Hash</span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-300 font-mono text-xs truncate max-w-[120px]">
-                        {selectedTx.hash}
-                      </span>
-                      <button onClick={() => copyHash(selectedTx.hash)} className="text-indigo-400 hover:text-white transition">
-                        {copiedHash ? <CheckCircle2 size={14} className="text-emerald-400" /> : <Copy size={14} />}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Botón Explorador */}
-                <a 
-                  href={`https://blockchair.com/search?q=${selectedTx.hash}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="mt-6 flex items-center justify-center gap-2 w-full py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold transition group"
-                >
-                  Ver en el Explorador de Bloques
-                  <ExternalLink size={16} className="text-slate-400 group-hover:text-white transition-colors" />
-                </a>
+                <button onClick={() => setIsTxModalOpen(false)} className="h-10 w-10 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 hover:text-white transition">
+                  <X size={20} />
+                </button>
               </div>
+
+              <div className="text-center mb-8">
+                <div className="text-5xl font-extrabold text-white mb-2">
+                  +{selectedTx.amount} <span className="text-3xl text-indigo-400">{selectedTx.symbol}</span>
+                </div>
+                <div className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-semibold ${selectedTx.status === 'confirmed' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
+                  {selectedTx.status === 'confirmed' ? <ShieldCheck size={14} /> : <Loader2 size={14} className="animate-spin" />}
+                  {selectedTx.status === 'confirmed' ? 'Añadido al saldo' : 'Esperando confirmaciones'}
+                </div>
+              </div>
+
+              {/* Barra de progreso con confirmaciones REALES */}
+              {selectedTx.status === 'pending' && (
+                <div className="mb-8 bg-slate-900/80 rounded-2xl p-5 border border-slate-800">
+                  <div className="flex justify-between text-xs font-medium mb-3">
+                    <span className="text-slate-400">Confirmaciones (Blockchair)</span>
+                    <span className="text-indigo-400 font-bold">
+                      {getTxDetails(selectedTx).currentConf} / {getTxDetails(selectedTx).requiredConf}
+                    </span>
+                  </div>
+                  <div className="h-3 w-full bg-slate-800 rounded-full overflow-hidden">
+                    <motion.div 
+                      initial={{ width: 0 }} animate={{ width: `${getTxDetails(selectedTx).progressPercentage}%` }} transition={{ duration: 1 }}
+                      className="h-full bg-gradient-to-r from-indigo-500 to-cyan-400"
+                    />
+                  </div>
+                  <div className="flex justify-between items-center mt-3">
+                    <p className="text-xs text-slate-500 flex items-center gap-1"><Clock size={12} /> Tiempo est.: {getTxDetails(selectedTx).timeString}</p>
+                    <button onClick={(e) => { e.stopPropagation(); fetchDeposits(); }} disabled={checking} className="text-xs flex items-center gap-1 text-indigo-400 hover:text-indigo-300">
+                      <RefreshCw size={12} className={checking ? "animate-spin" : ""} /> Actualizar
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-3 bg-slate-900/50 rounded-2xl p-4 border border-slate-800 mb-6">
+                <div className="flex justify-between text-sm"><span className="text-slate-400 flex items-center gap-2"><Zap size={14} /> Red</span><span className="text-white">{selectedTx.symbol}</span></div>
+                <div className="h-px w-full bg-slate-800" />
+                <div className="flex justify-between text-sm"><span className="text-slate-400 flex items-center gap-2"><Activity size={14} /> Hash</span><div className="flex items-center gap-2"><span className="text-slate-300 font-mono text-xs truncate max-w-[120px]">{selectedTx.hash}</span><button onClick={() => copyHash(selectedTx.hash)}>{copiedHash ? <CheckCircle2 size={14} className="text-emerald-400" /> : <Copy size={14} className="text-indigo-400" />}</button></div></div>
+              </div>
+
+              <a href={`https://blockchair.com/search?q=${selectedTx.hash}`} target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 w-full py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold transition">
+                Ver en Blockchair <ExternalLink size={16} />
+              </a>
             </motion.div>
           </motion.div>
         )}
