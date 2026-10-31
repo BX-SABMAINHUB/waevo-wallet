@@ -14,29 +14,27 @@ const TIMEFRAMES = [
 export function CoinChart({ coinId }: { coinId: string }) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const [timeframe, setTimeframe] = useState("1");
-  const [isClient, setIsClient] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
 
-  // 1. Nos aseguramos de que esto solo se ejecute en el navegador
+  // 1. Solo nos montamos en el cliente
   useEffect(() => {
-    setIsClient(true);
+    setIsMounted(true);
   }, []);
 
-  // 2. Cargamos el gráfico dinámicamente
+  // 2. Cargamos el gráfico de forma segura
   useEffect(() => {
-    if (!isClient || !chartContainerRef.current) return;
+    if (!isMounted || !chartContainerRef.current) return;
 
     let chart: any = null;
-    let isMounted = true;
+    let isCancelled = false;
 
     const initChart = async () => {
       try {
-        // 🔥 LA CLAVE: Importación dinámica. 
-        // Al no estar en el "top level", el servidor de Next.js no lo empaqueta.
-        const { createChart, ColorType, CandlestickSeries } = await import(
-          "lightweight-charts"
-        );
+        // Importación dinámica (solo se ejecuta en el navegador)
+        const lib = await import("lightweight-charts");
+        const { createChart, ColorType, CandlestickSeries } = lib;
 
-        if (!chartContainerRef.current || !isMounted) return;
+        if (isCancelled || !chartContainerRef.current) return;
 
         chart = createChart(chartContainerRef.current, {
           layout: {
@@ -51,7 +49,6 @@ export function CoinChart({ coinId }: { coinId: string }) {
           height: 400,
         });
 
-        // API de lightweight-charts v5
         const candlestickSeries = chart.addSeries(CandlestickSeries, {
           upColor: "#22c55e",
           downColor: "#ef4444",
@@ -60,60 +57,55 @@ export function CoinChart({ coinId }: { coinId: string }) {
           wickDownColor: "#ef4444",
         });
 
-        // Hacemos la petición a nuestra propia API Route
         const res = await fetch(`/api/ohlcv?coin=${coinId}&days=${timeframe}`);
-        
-        if (!res.ok) throw new Error("Error al obtener los datos del gráfico");
+        if (!res.ok) throw new Error("Error al cargar datos");
         
         const data = await res.json();
-
-        // Formateamos los datos para TradingView
         const formattedData = data.map((d: number[]) => ({
-          time: Math.floor(d[0] / 1000), // Convertir milisegundos a segundos
+          time: Math.floor(d[0] / 1000),
           open: d[1],
           high: d[2],
           low: d[3],
           close: d[4],
         }));
 
-        if (isMounted) {
+        if (!isCancelled) {
           candlestickSeries.setData(formattedData);
         }
 
-        // Manejo del redimensionado de la ventana
         const handleResize = () => {
           if (chartContainerRef.current && chart) {
-            chart.applyOptions({
-              width: chartContainerRef.current.clientWidth,
-            });
+            chart.applyOptions({ width: chartContainerRef.current.clientWidth });
           }
         };
 
         window.addEventListener("resize", handleResize);
-        (chart as any)._handleResize = handleResize;
+        (chart as any)._resizeHandler = handleResize;
 
       } catch (error) {
-        console.error("Error al inicializar el gráfico:", error);
+        console.error("Error al inicializar gráfico:", error);
       }
     };
 
     initChart();
 
-    // Limpieza al desmontar el componente o cambiar de moneda/tiempo
     return () => {
-      isMounted = false;
+      isCancelled = true;
       if (chart) {
-        if ((chart as any)._handleResize) {
-          window.removeEventListener("resize", (chart as any)._handleResize);
+        if ((chart as any)._resizeHandler) {
+          window.removeEventListener("resize", (chart as any)._resizeHandler);
         }
         chart.remove();
       }
     };
-  }, [coinId, timeframe, isClient]);
+  }, [coinId, timeframe, isMounted]);
+
+  if (!isMounted) {
+    return <div className="h-[400px] w-full animate-pulse rounded-xl bg-slate-800/50" />;
+  }
 
   return (
     <div>
-      {/* Selector de tiempo */}
       <div className="mb-4 flex flex-wrap gap-2">
         {TIMEFRAMES.map((tf) => (
           <button
@@ -129,8 +121,6 @@ export function CoinChart({ coinId }: { coinId: string }) {
           </button>
         ))}
       </div>
-
-      {/* Contenedor del gráfico */}
       <div
         ref={chartContainerRef}
         className="w-full overflow-hidden rounded-xl"
