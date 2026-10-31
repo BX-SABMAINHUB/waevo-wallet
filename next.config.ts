@@ -1,7 +1,18 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // La configuración de Webpack anterior ya no es necesaria
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      // Ignoramos 'fs' y 'path' en el bundle del cliente
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+        path: false,
+        crypto: false,
+      };
+    }
+    return config;
+  },
 };
 
 export default nextConfig;
