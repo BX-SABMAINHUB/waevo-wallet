@@ -21,7 +21,23 @@ const TATUM_CHAIN_MAP: Record<string, string> = {
   NEAR: 'near',
   ATOM: 'cosmos',
   FLOW: 'flow',
-  EOS: 'eos'
+  EOS: 'eos',
+  // Redes EVM y Tokens
+  ETH: 'ethereum',
+  USDT: 'ethereum',
+  USDC: 'ethereum',
+  DAI: 'ethereum',
+  LINK: 'ethereum',
+  UNI: 'ethereum',
+  SHIB: 'ethereum',
+  PEPE: 'ethereum',
+  MATIC: 'polygon',
+  BNB: 'bsc',
+  AVAX: 'avalanche-c-chain',
+  FTM: 'fantom',
+  ARB: 'arbitrum-one',
+  OP: 'optimism',
+  BASE: 'base'
 };
 
 export async function POST(request: Request) {
@@ -29,18 +45,10 @@ export async function POST(request: Request) {
     const { symbol } = await request.json();
     const upperSymbol = symbol?.toUpperCase();
     
-    // 1. Identificamos si es una red EVM (para usar la dirección de Privy)
-    const evmNetworks = ['ETH', 'BNB', 'MATIC', 'AVAX', 'FTM', 'ARB', 'OP', 'BASE', 'USDT', 'USDC', 'DAI', 'LINK', 'UNI', 'SHIB', 'PEPE'];
-    
-    // 2. Buscamos la cadena en Tatum
-    const chain = TATUM_CHAIN_MAP[upperSymbol];
+    // Buscamos la cadena en Tatum. Si no está, usamos 'ethereum' como fallback.
+    const chain = TATUM_CHAIN_MAP[upperSymbol] || 'ethereum';
 
-    // Si es EVM o una moneda no soportada por Tatum, le decimos al frontend que use Privy
-    if (evmNetworks.includes(upperSymbol) || !chain) {
-       return NextResponse.json({ isEvm: true, address: null });
-    }
-
-    // Si es una red independiente (BTC, SOL, etc.), llamamos a Tatum
+    // 1. Generar una wallet HD (xpub) para esta cadena
     const walletRes = await fetch(`https://api.tatum.io/v3/${chain}/wallet`, {
       method: 'GET',
       headers: { 'x-api-key': process.env.TATUM_API_KEY! },
@@ -49,7 +57,8 @@ export async function POST(request: Request) {
     if (!walletRes.ok) throw new Error('Error generando wallet en Tatum');
     const walletData = await walletRes.json();
 
-    // Derivar dirección usando el timestamp para que sea única
+    // 2. Derivar una dirección ÚNICA usando el timestamp actual como índice.
+    // Esto garantiza que cada vez que pidas una dirección para USDT o ETH, sea diferente.
     const index = Date.now();
     const addressRes = await fetch(
       `https://api.tatum.io/v3/${chain}/address/${walletData.xpub}/${index}`,
@@ -62,7 +71,7 @@ export async function POST(request: Request) {
     if (!addressRes.ok) throw new Error('Error derivando dirección en Tatum');
     const { address } = await addressRes.json();
 
-    return NextResponse.json({ isEvm: false, address });
+    return NextResponse.json({ address });
     
   } catch (error: any) {
     console.error('Error en API Tatum:', error);
