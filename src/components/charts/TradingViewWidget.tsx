@@ -2,31 +2,24 @@
 
 import { useEffect, useRef } from "react";
 
-interface TradingViewWidgetProps {
-  symbol: string; // Ejemplo: "BINANCE:BTCUSDT"
-}
-
-export function TradingViewWidget({ symbol }: TradingViewWidgetProps) {
+export function TradingViewWidget({ symbol }: { symbol: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Si el contenedor no está listo, salimos
     if (!containerRef.current) return;
 
-    // Creamos el contenedor interno que TradingView necesita
     const script = document.createElement("script");
     script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
     script.type = "text/javascript";
     script.async = true;
     
-    // Configuración del gráfico (colores oscuros, velas, etc.)
     script.innerHTML = JSON.stringify({
       autosize: true,
       symbol: symbol,
       interval: "D",
       timezone: "Etc/UTC",
       theme: "dark",
-      style: "1", // 1 = Velas japonesas
+      style: "1", // Velas japonesas
       locale: "es",
       enable_publishing: false,
       allow_symbol_change: true,
@@ -35,7 +28,6 @@ export function TradingViewWidget({ symbol }: TradingViewWidgetProps) {
       withdateranges: true,
     });
 
-    // Limpiamos el contenedor y añadimos el script
     const widgetContainer = document.createElement("div");
     widgetContainer.className = "tradingview-widget-container__widget";
     widgetContainer.style.height = "100%";
@@ -53,7 +45,7 @@ export function TradingViewWidget({ symbol }: TradingViewWidgetProps) {
   }, [symbol]);
 
   return (
-    <div className="tradingview-widget-container" style={{ height: "500px", width: "100%" }}>
+    <div className="tradingview-widget-container" style={{ height: "600px", width: "100%" }}>
       <div ref={containerRef} style={{ height: "100%", width: "100%" }} />
     </div>
   );
