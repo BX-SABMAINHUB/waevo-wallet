@@ -1,14 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import dynamic from "next/dynamic";
 import { Search, TrendingUp, TrendingDown, X } from "lucide-react";
-
-// 🔥 LA SOLUCIÓN: Cargamos el gráfico SOLO en el navegador
-const TradingViewWidget = dynamic(
-  () => import("@/components/charts/TradingViewWidget").then((mod) => mod.TradingViewWidget),
-  { ssr: false }
-);
 
 interface Coin {
   id: string;
@@ -25,6 +18,7 @@ export default function ExplorePage() {
   const [loading, setLoading] = useState(true);
   const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
 
+  // 1. Buscamos las monedas usando la API
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -42,39 +36,46 @@ export default function ExplorePage() {
     fetchCoins();
   }, []);
 
+  // 2. Filtro para la barra de búsqueda
   const filteredCoins = coins.filter(
     (coin) =>
       coin.name.toLowerCase().includes(search.toLowerCase()) ||
       coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
-  const getTradingViewSymbol = (coin: Coin) => {
-    const symbol = coin.symbol.toUpperCase();
-    return `BINANCE:${symbol}USDT`;
+  // 3. Función para crear el enlace del gráfico gigante (usando un iframe HTML puro)
+  const getTradingViewUrl = (coin: Coin) => {
+    // Pasamos el símbolo a mayúsculas (ej: btc -> BTC)
+    const symbol = `${coin.symbol.toUpperCase()}USDT`;
+    // Esta es la URL del widget de TradingView
+    return `https://s.tradingview.com/widgetembed/?symbol=BINANCE%3A${symbol}&interval=D&hidesidetoolbar=0&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=%5B%5D&theme=dark&style=1&timezone=Etc%2FUTC&withdateranges=1&showpopupbutton=1`;
   };
 
   return (
-    <div className="aurora-bg min-h-screen p-6 md:p-10">
+    <div className="min-h-screen bg-slate-950 p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
+        
+        {/* CABECERA Y BARRA DE BÚSQUEDA */}
         <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">Explorar monedas</h1>
+            <h1 className="text-3xl font-bold text-white">Explorar monedas</h1>
             <p className="mt-1 text-sm text-slate-400">
-              Busca una moneda y abre su gráfico profesional al instante.
+              Busca cualquier criptomoneda y abre su gráfico avanzado.
             </p>
           </div>
           <div className="relative">
             <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
             <input
               type="text"
-              placeholder="Buscar moneda..."
+              placeholder="Buscar moneda (ej. BTC)..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full rounded-xl border border-slate-700 bg-slate-900/60 py-2.5 pl-10 pr-4 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500 md:w-72"
+              className="w-full rounded-xl border border-slate-700 bg-slate-900 py-2.5 pl-10 pr-4 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500 md:w-72"
             />
           </div>
         </div>
 
+        {/* LISTA DE MONEDAS */}
         {loading ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[...Array(6)].map((_, i) => (
@@ -87,18 +88,18 @@ export default function ExplorePage() {
               <div
                 key={coin.id}
                 onClick={() => setSelectedCoin(coin)}
-                className="cursor-pointer group block rounded-2xl glass p-5 transition hover:border-indigo-500/40 hover:-translate-y-1"
+                className="cursor-pointer rounded-2xl border border-slate-800 bg-slate-900 p-5 transition hover:border-indigo-500/50 hover:bg-slate-800"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <img src={coin.image} alt={coin.name} className="h-8 w-8 rounded-full" />
                     <div>
-                      <h3 className="font-semibold">{coin.name}</h3>
+                      <h3 className="font-semibold text-white">{coin.name}</h3>
                       <span className="text-xs uppercase text-slate-400">{coin.symbol}</span>
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="font-medium">
+                    <div className="font-medium text-white">
                       ${coin.current_price.toLocaleString()}
                     </div>
                     <div
@@ -123,33 +124,33 @@ export default function ExplorePage() {
         )}
       </div>
 
-      {/* MODAL GIGANTE CON EL GRÁFICO DE TRADINGVIEW */}
+      {/* PANTALLA COMPLETA CON EL GRÁFICO HTML */}
       {selectedCoin && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
-          onClick={() => setSelectedCoin(null)}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="relative w-full max-w-6xl rounded-2xl border border-slate-700 bg-slate-900 p-2 shadow-2xl"
-          >
-            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
-              <div className="flex items-center gap-3">
-                <img src={selectedCoin.image} alt={selectedCoin.name} className="h-8 w-8" />
-                <h2 className="text-xl font-bold">{selectedCoin.name} ({selectedCoin.symbol.toUpperCase()})</h2>
-              </div>
-              <button
-                onClick={() => setSelectedCoin(null)}
-                className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white transition"
-              >
-                <X size={20} />
-              </button>
+        <div className="fixed inset-0 z-50 flex flex-col bg-slate-950">
+          {/* Barra superior del gráfico */}
+          <div className="flex items-center justify-between border-b border-slate-800 p-4">
+            <div className="flex items-center gap-3">
+              <img src={selectedCoin.image} alt={selectedCoin.name} className="h-8 w-8" />
+              <h2 className="text-xl font-bold text-white">
+                {selectedCoin.name} ({selectedCoin.symbol.toUpperCase()})
+              </h2>
             </div>
-            
-            <div className="mt-2 h-[600px] w-full rounded-xl overflow-hidden">
-              {/* El gráfico se carga de forma segura gracias al dynamic import */}
-              <TradingViewWidget symbol={getTradingViewSymbol(selectedCoin)} />
-            </div>
+            <button
+              onClick={() => setSelectedCoin(null)}
+              className="rounded-lg bg-slate-800 p-2 text-slate-400 hover:bg-slate-700 hover:text-white transition"
+            >
+              <X size={24} />
+            </button>
+          </div>
+          
+          {/* El iframe con el gráfico puro de TradingView (HTML puro) */}
+          <div className="flex-1 w-full bg-slate-900">
+            <iframe
+              src={getTradingViewUrl(selectedCoin)}
+              style={{ width: "100%", height: "100%", border: "none" }}
+              allowFullScreen
+              title="Gráfico Avanzado"
+            />
           </div>
         </div>
       )}
