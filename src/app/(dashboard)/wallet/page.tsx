@@ -1,54 +1,79 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useWallets, usePrivy } from "@privy-io/react-auth";
+import { useState, useEffect, useMemo } from "react";
+import { useWallets, useSendTransaction, useDepositAddress, usePrivy } from "@privy-io/react-auth";
+import { createPublicClient, http, formatEther, parseEther } from "viem";
+import { mainnet } from "viem/chains";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
-import {
-  Search,
-  ArrowDownLeft,
-  ArrowUpRight,
-  X,
-  Copy,
-  CheckCircle2,
-  Wallet,
-  ShieldCheck,
-} from "lucide-react";
+import { Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, ShieldCheck } from "lucide-react";
 
-// Interfaz para las monedas
 interface Coin {
   id: string;
   symbol: string;
   name: string;
   image: string;
   current_price: number;
-  price_change_percentage_24h: number;
 }
 
 export default function WalletPage() {
-  const { ready, authenticated, login } = usePrivy();
+  const { ready } = usePrivy();
   const { wallets } = useWallets();
-  
+  const { sendTransaction } = useSendTransaction();
+  const { createDepositAddress } = useDepositAddress();
+
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
-  
-  // Estados para los modales
   const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
   const [modalType, setModalType] = useState<"send" | "receive" | null>(null);
   
+  // Estados para el saldo real
+  const [nativeBalance, setNativeBalance] = useState<string>("0");
+  const [isBalanceLoading, setIsBalanceLoading] = useState(true);
+
   // Estados del formulario de envío
   const [sendAddress, setSendAddress] = useState("");
   const [sendAmount, setSendAmount] = useState("");
-  const [sendNetwork, setSendNetwork] = useState("Ethereum");
   const [isSending, setIsSending] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Obtener la dirección real de la billetera del usuario desde Privy
+  // 1. Obtener la billetera de Privy
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
-  const userAddress = embeddedWallet?.address || "Conectando billetera...";
+  const userAddress = embeddedWallet?.address;
 
-  // Cargar monedas desde la API
+  // 2. Consultar el saldo real on-chain con viem
+  useEffect(() => {
+    if (!userAddress || !embeddedWallet) return;
+
+    const fetchBalance = async () => {
+      setIsBalanceLoading(true);
+      try {
+        // Creamos un cliente público para leer la blockchain de Ethereum
+        const client = createPublicClient({
+          chain: mainnet,
+          transport: http(),
+        });
+
+        // Obtenemos el saldo en wei
+        const balanceWei = await client.getBalance({
+          address: userAddress as `0x${string}`,
+        });
+
+        // Lo convertimos a ETH (string legible)
+        setNativeBalance(formatEther(balanceWei));
+      } catch (error) {
+        console.error("Error obteniendo saldo:", error);
+        setNativeBalance("0");
+      } finally {
+        setIsBalanceLoading(false);
+      }
+    };
+
+    fetchBalance();
+  }, [userAddress, embeddedWallet]);
+
+  // Cargar monedas (solo para el listado visual)
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -72,7 +97,55 @@ export default function WalletPage() {
       coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
-  // Copiar dirección al portapapeles
+  // 3. Enviar transacción REAL
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!embeddedWallet || !selectedCoin) return;
+
+    setIsSending(true);
+    try {
+      // Convertimos la cantidad a wei (para ETH nativo)
+      const valueInWei = parseEther(sendAmount);
+
+      // Llamamos a la función real de Privy
+      const { hash } = await sendTransaction({
+        to: sendAddress,
+        value: valueInWei, // Para tokens ERC-20, esto cambiaría a data
+      });
+
+      alert(`✅ Transacción enviada con éxito. Hash: ${hash}`);
+      setModalType(null);
+      setSendAddress("");
+      setSendAmount("");
+      // Refrescamos el saldo después de enviar
+      if (userAddress) {
+        const client = createPublicClient({ chain: mainnet, transport: http() });
+        const balanceWei = await client.getBalance({ address: userAddress as `0x${string}` });
+        setNativeBalance(formatEther(balanceWei));
+      }
+    } catch (error: any) {
+      console.error("Error al enviar:", error);
+      alert(`❌ Error al enviar: ${error.message || "Revisa tu conexión o saldo"}`);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  // 4. Generar dirección de depósito (o usar la dirección de la wallet)
+  const handleReceive = async () => {
+    if (!embeddedWallet) return;
+    // Opción A: Usar la dirección de la wallet directamente
+    // Opción B: Usar createDepositAddress para una dirección de depósito dedicada
+    // Aquí usamos la dirección de la wallet para simplificar y mostrar la real.
+    // Si quieres usar la dirección de depósito dedicada, descomenta:
+    // await createDepositAddress({
+    //   destinationChain: 'eip155:1', // Ethereum
+    //   destinationAddress: embeddedWallet.address,
+    //   destinationCurrency: '0x0000000000000000000000000000000000000000', // ETH nativo
+    // });
+    setModalType("receive");
+  };
+
   const copyToClipboard = () => {
     if (userAddress) {
       navigator.clipboard.writeText(userAddress);
@@ -81,35 +154,19 @@ export default function WalletPage() {
     }
   };
 
-  // Manejar el envío
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSending(true);
-    
-    // Aquí iría la lógica real de envío usando el SDK de Privy
-    // Ejemplo: await embeddedWallet.sendTransaction({ to: sendAddress, value: ... })
-    
-    setTimeout(() => {
-      alert(`Simulación: Enviando ${sendAmount} ${selectedCoin?.symbol.toUpperCase()} a ${sendAddress} por la red ${sendNetwork}`);
-      setIsSending(false);
-      setModalType(null);
-      setSendAddress("");
-      setSendAmount("");
-    }, 2000);
-  };
+  // El saldo total en USD (solo ETH por ahora, pero puedes ampliarlo)
+  const totalUsd = useMemo(() => {
+    const ethPrice = coins.find((c) => c.id === "ethereum")?.current_price || 0;
+    return parseFloat(nativeBalance) * ethPrice;
+  }, [nativeBalance, coins]);
 
-  // Calcular un saldo ficticio para la demo visual (ya que no hay fondos reales aún)
-  const mockBalance = 12450.80;
-
-  if (!ready) {
-    return <div className="p-10 text-center text-white">Cargando billetera segura...</div>;
-  }
+  if (!ready) return <div className="p-10 text-center text-white">Cargando billetera segura...</div>;
 
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
         
-        {/* CABECERA: SALDO TOTAL Y DIRECCIÓN */}
+        {/* CABECERA: SALDO REAL */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -117,10 +174,13 @@ export default function WalletPage() {
         >
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
             <div>
-              <p className="text-sm font-medium text-indigo-300 mb-1">Balance Total Estimado</p>
+              <p className="text-sm font-medium text-indigo-300 mb-1">Balance Total</p>
               <h1 className="text-4xl md:text-5xl font-bold text-white tracking-tight">
-                ${mockBalance.toLocaleString("en-US", { minimumFractionDigits: 2 })}
+                ${totalUsd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </h1>
+              <p className="text-sm text-slate-400 mt-1">
+                {isBalanceLoading ? "Calculando..." : `${nativeBalance} ETH`}
+              </p>
             </div>
             <div className="flex flex-col items-start md:items-end">
               <div className="flex items-center gap-2 rounded-full bg-slate-800/80 px-4 py-2 text-sm text-slate-300 border border-slate-700">
@@ -132,7 +192,7 @@ export default function WalletPage() {
                 className="mt-3 flex items-center gap-2 text-xs text-slate-400 hover:text-white transition"
               >
                 {copied ? <CheckCircle2 size={14} className="text-emerald-400" /> : <Copy size={14} />}
-                {userAddress.slice(0, 6)}...{userAddress.slice(-4)}
+                {userAddress ? `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}` : "Sin dirección"}
               </button>
             </div>
           </div>
@@ -156,7 +216,7 @@ export default function WalletPage() {
           </div>
         </div>
 
-        {/* LISTA DE MONEDAS */}
+        {/* LISTA DE MONEDAS CON SALDO REAL (solo ETH por ahora) */}
         {loading ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[...Array(6)].map((_, i) => (
@@ -165,35 +225,39 @@ export default function WalletPage() {
           </div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {filteredCoins.map((coin) => (
-              <motion.div
-                key={coin.id}
-                whileHover={{ y: -4 }}
-                className="rounded-2xl glass p-5 cursor-pointer hover:border-indigo-500/40 transition"
-                onClick={() => setSelectedCoin(coin)}
-              >
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-3">
-                    <img src={coin.image} alt={coin.name} className="h-10 w-10 rounded-full" />
-                    <div>
-                      <h3 className="font-semibold text-white">{coin.name}</h3>
-                      <span className="text-xs uppercase text-slate-400">{coin.symbol}</span>
+            {filteredCoins.map((coin) => {
+              // Para ETH mostramos el saldo real. Para el resto, 0.
+              const isEth = coin.id === "ethereum";
+              const balanceDisplay = isEth ? parseFloat(nativeBalance).toFixed(4) : "0.0000";
+              
+              return (
+                <motion.div
+                  key={coin.id}
+                  whileHover={{ y: -4 }}
+                  className="rounded-2xl glass p-5 cursor-pointer hover:border-indigo-500/40 transition"
+                  onClick={() => setSelectedCoin(coin)}
+                >
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <img src={coin.image} alt={coin.name} className="h-10 w-10 rounded-full" />
+                      <div>
+                        <h3 className="font-semibold text-white">{coin.name}</h3>
+                        <span className="text-xs uppercase text-slate-400">{coin.symbol}</span>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-medium text-white">${coin.current_price.toLocaleString()}</div>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="font-medium text-white">${coin.current_price.toLocaleString()}</div>
+                  <div className="flex items-center justify-between border-t border-slate-800 pt-3">
+                    <div className="text-sm text-slate-400">Tu saldo</div>
+                    <div className="text-sm font-semibold text-white">
+                      {balanceDisplay} {coin.symbol.toUpperCase()}
+                    </div>
                   </div>
-                </div>
-                
-                {/* Simulación de saldo de esta moneda */}
-                <div className="flex items-center justify-between border-t border-slate-800 pt-3">
-                  <div className="text-sm text-slate-400">Tu saldo</div>
-                  <div className="text-sm font-semibold text-white">
-                    {(Math.random() * 2).toFixed(4)} {coin.symbol.toUpperCase()}
-                  </div>
-                </div>
-              </motion.div>
-            ))}
+                </motion.div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -227,7 +291,7 @@ export default function WalletPage() {
               
               <div className="grid grid-cols-2 gap-4">
                 <button
-                  onClick={() => setModalType("receive")}
+                  onClick={handleReceive}
                   className="flex flex-col items-center justify-center gap-2 rounded-2xl bg-slate-800 p-6 hover:bg-slate-700 transition"
                 >
                   <div className="h-12 w-12 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
@@ -250,7 +314,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* MODAL DE RECIBIR */}
+      {/* MODAL DE RECIBIR (CON DIRECCIÓN REAL) */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
           <motion.div
@@ -272,32 +336,33 @@ export default function WalletPage() {
               </button>
               <h3 className="text-2xl font-bold text-white mb-2">Recibir {selectedCoin.name}</h3>
               <p className="text-sm text-slate-400 mb-6">
-                Esta es tu dirección permanente de {selectedCoin.symbol.toUpperCase()} en la red Ethereum.
+                Esta es tu dirección real de {selectedCoin.symbol.toUpperCase()} en la red Ethereum.
               </p>
               
-              <div className="bg-white p-4 rounded-2xl inline-block mb-6">
-                {/* QR REAL GENERADO CON LA DIRECCIÓN DE PRIVY */}
-                <QRCodeSVG value={userAddress} size={200} />
-              </div>
-              
-              <div className="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3">
-                <span className="text-sm font-mono text-slate-300 truncate">{userAddress}</span>
-                <button
-                  onClick={copyToClipboard}
-                  className="text-indigo-400 hover:text-indigo-300 flex-shrink-0"
-                >
-                  {copied ? <CheckCircle2 size={20} className="text-emerald-400" /> : <Copy size={20} />}
-                </button>
-              </div>
+              {userAddress ? (
+                <>
+                  <div className="bg-white p-4 rounded-2xl inline-block mb-6">
+                    <QRCodeSVG value={userAddress} size={200} />
+                  </div>
+                  <div className="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3">
+                    <span className="text-sm font-mono text-slate-300 truncate">{userAddress}</span>
+                    <button onClick={copyToClipboard} className="text-indigo-400 hover:text-indigo-300 flex-shrink-0">
+                      {copied ? <CheckCircle2 size={20} className="text-emerald-400" /> : <Copy size={20} />}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <p className="text-red-400">No se pudo cargar la dirección de la billetera.</p>
+              )}
               <p className="text-xs text-slate-500 mt-4">
-                Envía únicamente {selectedCoin.symbol.toUpperCase()} a esta dirección. De lo contrario, perderás tus fondos.
+                Envía únicamente {selectedCoin.symbol.toUpperCase()} a esta dirección.
               </p>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* MODAL DE ENVIAR */}
+      {/* MODAL DE ENVIAR (TRANSACCIÓN REAL) */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <motion.div
@@ -334,32 +399,17 @@ export default function WalletPage() {
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">Red</label>
-                    <select
-                      value={sendNetwork}
-                      onChange={(e) => setSendNetwork(e.target.value)}
-                      className="w-full rounded-xl border border-slate-700 bg-slate-800 py-3 px-4 text-sm text-white outline-none focus:border-indigo-500 appearance-none"
-                    >
-                      <option value="Ethereum">Ethereum</option>
-                      <option value="Polygon">Polygon</option>
-                      <option value="Base">Base</option>
-                      <option value="Arbitrum">Arbitrum</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">Cantidad</label>
-                    <input
-                      type="number"
-                      step="any"
-                      required
-                      value={sendAmount}
-                      onChange={(e) => setSendAmount(e.target.value)}
-                      placeholder="0.00"
-                      className="w-full rounded-xl border border-slate-700 bg-slate-800 py-3 px-4 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500"
-                    />
-                  </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Cantidad</label>
+                  <input
+                    type="number"
+                    step="any"
+                    required
+                    value={sendAmount}
+                    onChange={(e) => setSendAmount(e.target.value)}
+                    placeholder="0.00"
+                    className="w-full rounded-xl border border-slate-700 bg-slate-800 py-3 px-4 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500"
+                  />
                 </div>
 
                 <div className="pt-4">
@@ -368,7 +418,7 @@ export default function WalletPage() {
                     disabled={isSending}
                     className="w-full rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-400 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 disabled:opacity-60 transition hover:scale-[1.02]"
                   >
-                    {isSending ? "Procesando envío..." : "Confirmar Envío"}
+                    {isSending ? "Firmando y enviando..." : "Confirmar Envío Real"}
                   </button>
                 </div>
               </form>
