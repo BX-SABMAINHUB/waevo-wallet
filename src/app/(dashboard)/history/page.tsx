@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from "react";
 import { useWallets, usePrivy } from "@privy-io/react-auth";
 import { motion, AnimatePresence } from "@/components/motion-client";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { db, auth } from "@/lib/firebase";
 import { 
   History, RefreshCw, CheckCircle2, Clock, Wallet, 
   Loader2, AlertCircle, Search, ChevronDown, Coins
@@ -29,22 +31,20 @@ export default function HistoryPage() {
   const { wallets } = useWallets();
   const embeddedWallet = wallets.find(w => w.walletClientType === 'privy');
   const userAddress = embeddedWallet?.address || '';
+  const uid = auth.currentUser?.uid;
 
-  // Estados de monedas y búsqueda
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Estados de verificación
   const [deposits, setDeposits] = useState<Deposit[]>([]);
   const [checking, setChecking] = useState(false);
   const [checked, setChecked] = useState(false);
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
 
-  // 1. Cargar todas las monedas de CoinGecko
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -60,7 +60,6 @@ export default function HistoryPage() {
     fetchCoins();
   }, []);
 
-  // 2. Cerrar el dropdown si haces clic fuera
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -77,7 +76,6 @@ export default function HistoryPage() {
       coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
-  // 3. Al seleccionar una moneda, generamos o recuperamos su dirección
   const handleSelectCoin = async (coin: Coin) => {
     setSelectedCoin(coin);
     setIsDropdownOpen(false);
@@ -85,18 +83,34 @@ export default function HistoryPage() {
     setDeposits([]);
     setChecked(false);
 
-    // Si ya tenemos la dirección en caché, no hacemos nada
-    if (depositAddresses[coin.id]) return;
+    if (depositAddresses[coin.id] || !uid) return;
 
     setIsGeneratingAddress(true);
     try {
+      // 1. Buscar en Firestore
+      const docRef = doc(db, "users", uid, "wallets", coin.id);
+      const docSnap = await getDoc(docRef);
+      
+      if (docSnap.exists()) {
+        setDepositAddresses(prev => ({ ...prev, [coin.id]: docSnap.data().address }));
+        return;
+      }
+
+      // 2. Si no existe, generar y guardar
       const res = await fetch('/api/generate-address', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: coin.symbol }),
       });
       const data = await res.json();
+      
       if (data.address) {
+        await setDoc(docRef, { 
+          address: data.address, 
+          symbol: coin.symbol, 
+          name: coin.name,
+          createdAt: new Date().toISOString()
+        });
         setDepositAddresses(prev => ({ ...prev, [coin.id]: data.address }));
       }
     } catch (error) {
@@ -106,7 +120,6 @@ export default function HistoryPage() {
     }
   };
 
-  // 4. Verificar ingresos en la dirección seleccionada
   const handleCheckDeposits = async () => {
     if (!selectedCoin || !depositAddresses[selectedCoin.id]) return;
     
@@ -139,18 +152,13 @@ export default function HistoryPage() {
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-5xl">
-        
-        {/* CABECERA */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-8">
           <h1 className="text-3xl font-bold text-white mb-2">Ingresos y Historial</h1>
           <p className="text-slate-400 text-sm">Selecciona una moneda y verifica si has recibido fondos.</p>
         </motion.div>
 
-        {/* SELECTOR DE MONEDA Y BOTÓN DE VERIFICACIÓN */}
         <div className="mb-8 rounded-3xl border border-slate-800 bg-slate-900/50 p-6 backdrop-blur-xl">
           <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
-            
-            {/* Buscador de monedas */}
             <div className="relative w-full md:w-80" ref={dropdownRef}>
               <div 
                 onClick={() => setIsDropdownOpen(!isDropdownOpen)}
@@ -164,14 +172,13 @@ export default function HistoryPage() {
                     </>
                   ) : (
                     <span className="text-slate-400 flex items-center gap-2">
-                      <Search size={16} /> Buscar moneda para verificar...
+                      <Search size={16} /> Buscar moneda...
                     </span>
                   )}
                 </div>
                 <ChevronDown size={16} className={`text-slate-400 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} />
               </div>
 
-              {/* Dropdown de búsqueda */}
               <AnimatePresence>
                 {isDropdownOpen && (
                   <motion.div 
@@ -191,30 +198,25 @@ export default function HistoryPage() {
                       />
                     </div>
                     <div className="max-h-60 overflow-y-auto">
-                      {filteredCoins.length === 0 ? (
-                        <p className="p-4 text-xs text-slate-400 text-center">No se encontraron monedas.</p>
-                      ) : (
-                        filteredCoins.map((coin) => (
-                          <div
-                            key={coin.id}
-                            onClick={() => handleSelectCoin(coin)}
-                            className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-slate-700 transition"
-                          >
-                            <img src={coin.image} alt={coin.name} className="h-6 w-6 rounded-full" />
-                            <div>
-                              <p className="text-sm font-medium text-white">{coin.name}</p>
-                              <p className="text-xs text-slate-400">{coin.symbol.toUpperCase()}</p>
-                            </div>
+                      {filteredCoins.map((coin) => (
+                        <div
+                          key={coin.id}
+                          onClick={() => handleSelectCoin(coin)}
+                          className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-slate-700 transition"
+                        >
+                          <img src={coin.image} alt={coin.name} className="h-6 w-6 rounded-full" />
+                          <div>
+                            <p className="text-sm font-medium text-white">{coin.name}</p>
+                            <p className="text-xs text-slate-400">{coin.symbol.toUpperCase()}</p>
                           </div>
-                        ))
-                      )}
+                        </div>
+                      ))}
                     </div>
                   </motion.div>
                 )}
               </AnimatePresence>
             </div>
 
-            {/* Botón de Verificar */}
             <button
               onClick={handleCheckDeposits}
               disabled={!selectedCoin || isGeneratingAddress || checking}
@@ -225,7 +227,6 @@ export default function HistoryPage() {
             </button>
           </div>
 
-          {/* Dirección de la billetera a verificar (EN PEQUEÑITO) */}
           {selectedCoin && (
             <div className="mt-4 flex items-center gap-2 text-xs text-slate-400 bg-slate-950/50 p-3 rounded-lg border border-slate-800/50">
               <Wallet size={14} className="text-indigo-400 flex-shrink-0" />
@@ -242,7 +243,6 @@ export default function HistoryPage() {
           )}
         </div>
 
-        {/* RESULTADOS DE LA VERIFICACIÓN */}
         <AnimatePresence>
           {checked && !checking && deposits.length === 0 && (
             <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex items-center gap-2 text-sm text-slate-400 bg-slate-900/40 p-4 rounded-xl border border-slate-800">
