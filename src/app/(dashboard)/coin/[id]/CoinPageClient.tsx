@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 
-// Carga dinámica con ssr: false para que Next.js no lo procese en el servidor
+// Al estar en un Client Component, ssr: false es 100% válido aquí
 const HighchartsStockChart = dynamic(
   () => import("@/components/charts/HighchartsStockChart").then((mod) => mod.HighchartsStockChart),
   {
