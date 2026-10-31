@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { useWallets, useSendTransaction, usePrivy, useDepositAddress } from "@privy-io/react-auth";
+import { useWallets, useSendTransaction, usePrivy } from "@privy-io/react-auth";
+import { useDepositAddress } from "@privy-io/react-auth/hooks"; // ✅ Hook headless
 import { createPublicClient, http, formatEther, parseEther } from "viem";
 import { mainnet } from "viem/chains";
 import { QRCodeSVG } from "qrcode.react";
@@ -20,11 +21,27 @@ interface Coin {
   price_change_percentage_24h: number;
 }
 
+// Mapeo de símbolos a identificadores CAIP-2 para las cadenas soportadas por Privy
+const CHAIN_MAP: Record<string, string> = {
+  ETH: "eip155:1",
+  MATIC: "eip155:137",
+  BNB: "eip155:56",
+  AVAX: "eip155:43114",
+  ARB: "eip155:42161",
+  OP: "eip155:10",
+  BASE: "eip155:8453",
+  BTC: "bip122:000000000019d6689c085ae165831e93",
+  SOL: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+  // Añade más monedas según sea necesario
+};
+
 export default function WalletPage() {
   const { ready, authenticated, login } = usePrivy();
   const { wallets } = useWallets();
   const { sendTransaction } = useSendTransaction();
-  const { createDepositAddress } = useDepositAddress();
+  
+  // ✅ Hook headless para generar direcciones de depósito reales
+  const { generateDepositAddress } = useDepositAddress(); 
 
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
@@ -41,6 +58,7 @@ export default function WalletPage() {
   const [copied, setCopied] = useState(false);
   const [selectedNetwork, setSelectedNetwork] = useState("Ethereum");
 
+  // Estados para las direcciones de depósito generadas
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
 
@@ -126,23 +144,35 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
+  // --- GENERAR DIRECCIÓN REAL CON EL HOOK HEADLESS ---
   const handleOpenReceive = async (coin: Coin) => {
     if (!embeddedWallet) return;
+
+    // Si ya tenemos una dirección guardada para esta moneda, la usamos
     if (depositAddresses[coin.id]) {
       setSelectedCoin(coin);
       setModalType("receive");
       return;
     }
+
     setIsGeneratingAddress(true);
     try {
-      await createDepositAddress({
-        destinationChain: 'eip155:1',
+      const symbol = coin.symbol.toUpperCase();
+      // Obtenemos el identificador de cadena CAIP-2, o usamos Ethereum por defecto
+      const destinationChain = CHAIN_MAP[symbol] || "eip155:1"; 
+      
+      // Llamamos al método del hook headless que SÍ devuelve la dirección
+      const result = await generateDepositAddress({
+        destinationChain,
         destinationAddress: embeddedWallet.address,
-        destinationCurrency: '0x0000000000000000000000000000000000000000',
+        // La moneda de destino puede ser el símbolo nativo o el contrato
+        destinationCurrency: symbol, 
       });
-      // Nota: createDepositAddress en la versión modal no devuelve la dirección directamente.
-      // La dirección se mostrará en el modal de Privy. Si usas la versión headless,
-      // generateDepositAddress sí devuelve la dirección.
+
+      // El hook devuelve un objeto con la dirección de depósito
+      const address = result.deposit_address;
+
+      setDepositAddresses(prev => ({ ...prev, [coin.id]: address }));
       setSelectedCoin(coin);
       setModalType("receive");
     } catch (error: any) {
@@ -161,7 +191,7 @@ export default function WalletPage() {
         network: `Red de ${selectedCoin.name} (Depósito Privy)` 
       };
     }
-    return { address: "Dirección generada en el modal de Privy", network: "Privy" };
+    return { address: "Generando dirección...", network: "Cargando" };
   };
 
   if (!ready) {
@@ -399,7 +429,7 @@ export default function WalletPage() {
               <div className="flex items-start gap-2 mt-4 p-3 rounded-lg bg-amber-500/10 text-amber-400 text-left border border-amber-500/20">
                 <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
                 <p className="text-xs leading-relaxed">
-                  El modal de Privy se ha abierto para generar tu dirección de depósito única. Una vez generada, podrás recibir {selectedCoin.symbol.toUpperCase()} en ella.
+                  Esta es una dirección de depósito real y persistente generada por Privy. Puedes enviar {selectedCoin.symbol.toUpperCase()} desde cualquier billetera compatible.
                 </p>
               </div>
             </motion.div>
