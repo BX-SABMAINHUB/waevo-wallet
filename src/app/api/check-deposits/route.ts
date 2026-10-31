@@ -1,143 +1,94 @@
 import { NextResponse } from 'next/server';
 
-// Mapeo de símbolos a los nombres de cadena que usa Tatum en sus endpoints v3
+// Mapeo de símbolos a los nombres de cadena que usa Tatum en su API v4
 const TATUM_CHAIN_MAP: Record<string, string> = {
-  BTC: 'bitcoin',
-  LTC: 'litecoin',
-  DOGE: 'dogecoin',
-  BCH: 'bitcoin-cash',
+  BTC: 'bitcoin-mainnet',
+  LTC: 'litecoin-mainnet',
+  DOGE: 'dogecoin-mainnet',
+  BCH: 'bitcoin-cash-mainnet',
   ETH: 'ethereum',
   MATIC: 'polygon',
 };
 
-// Cadenas UTXO que usan el mismo formato de respuesta en v3
-const UTXO_CHAINS = ['bitcoin', 'litecoin', 'dogecoin', 'bitcoin-cash'];
+// Cadenas UTXO que usan el endpoint de historial de transacciones v4
+const UTXO_CHAINS = ['bitcoin-mainnet', 'litecoin-mainnet', 'dogecoin-mainnet', 'bitcoin-cash-mainnet'];
 
 export async function POST(request: Request) {
-  const startTime = Date.now();
-  console.log(`\n[CHECK-DEPOSITS] Iniciando verificación con Tatum v3...`);
-
   try {
-    const body = await request.json();
-    const { symbol, address } = body;
-
+    const { symbol, address } = await request.json();
     if (!symbol || !address) {
-      console.error(`❌ Faltan parámetros: symbol=${symbol}, address=${address}`);
       return NextResponse.json({ error: 'Faltan símbolo o dirección' }, { status: 400 });
     }
 
     const upperSymbol = symbol.toUpperCase();
     const chain = TATUM_CHAIN_MAP[upperSymbol];
+    const apiKey = process.env.TATUM_API_KEY;
 
     if (!chain) {
-      console.error(`❌ Red no soportada: ${upperSymbol}`);
-      return NextResponse.json({ error: `Red ${upperSymbol} no soportada` }, { status: 400 });
+      return NextResponse.json({ error: `Red no soportada: ${upperSymbol}` }, { status: 400 });
     }
-
-    // Solo procesamos cadenas UTXO con esta lógica
-    if (!UTXO_CHAINS.includes(chain)) {
-      console.log(`⚠️ Saltando ${chain} (no es UTXO)`);
-      return NextResponse.json({ deposits: [], balance: '0' });
-    }
-
-    const apiKey = process.env.TATUM_API_KEY;
     if (!apiKey) {
-      console.error('❌ TATUM_API_KEY no está configurada');
       return NextResponse.json({ error: 'API Key de Tatum no configurada' }, { status: 500 });
     }
 
-    // 1. Obtener la altura actual de la blockchain
-    console.log(`📡 Obteniendo altura actual de ${chain}...`);
-    const infoRes = await fetch(`https://api.tatum.io/v3/${chain}/info`, {
+    // 1. Obtener la altura actual de la blockchain (endpoint v4)
+    const infoRes = await fetch(`https://api.tatum.io/v4/data/blockchains/block/current?chain=${chain}`, {
       headers: { 'x-api-key': apiKey },
     });
-
-    if (!infoRes.ok) {
-      const errText = await infoRes.text();
-      console.error(`❌ Error obteniendo info de ${chain}: ${infoRes.status} - ${errText}`);
-      throw new Error(`Error Tatum (info): ${infoRes.status}`);
-    }
-
+    if (!infoRes.ok) throw new Error(`Error obteniendo altura del bloque: ${infoRes.status}`);
     const infoData = await infoRes.json();
-    // El campo 'blocks' contiene la altura del último bloque
-    const currentBlock = infoData.blocks;
-    if (typeof currentBlock !== 'number') {
-      console.error(`❌ Altura de bloque inválida: ${currentBlock}`);
-      throw new Error('No se pudo obtener la altura del bloque actual');
+    const currentBlock = infoData.height; // La v4 devuelve 'height'
+    if (typeof currentBlock !== 'number') throw new Error('Altura de bloque inválida');
+
+    // 2. Obtener el historial de transacciones de la dirección (endpoint v4)
+    let transactions = [];
+    if (UTXO_CHAINS.includes(chain)) {
+      // Endpoint v4 para historial de UTXO
+      const url = new URL('https://api.tatum.io/v4/data/blockchains/transaction/history/utxos');
+      url.searchParams.append('chain', chain);
+      url.searchParams.append('address', address);
+      url.searchParams.append('pageSize', '50'); // Límite de transacciones a revisar
+
+      const txRes = await fetch(url.toString(), { headers: { 'x-api-key': apiKey } });
+      
+      if (txRes.status === 404) {
+        return NextResponse.json({ deposits: [], balance: '0', currentBlockHeight: currentBlock });
+      }
+      if (!txRes.ok) {
+        const errText = await txRes.text();
+        throw new Error(`Error en Tatum v4: ${txRes.status} - ${errText}`);
+      }
+      const txData = await txRes.json();
+      transactions = txData.data || []; // La v4 devuelve los datos en 'data'
+    } else {
+        // (Omitimos EVM por simplicidad, pero se podría añadir aquí)
+        return NextResponse.json({ deposits: [], balance: '0' });
     }
-
-    console.log(`📦 Altura actual de ${chain}: ${currentBlock}`);
-
-    // 2. Obtener las transacciones de la dirección
-    console.log(`📡 Obteniendo transacciones de ${address}...`);
-    const txRes = await fetch(`https://api.tatum.io/v3/${chain}/transaction/address/${address}`, {
-      headers: { 'x-api-key': apiKey },
-    });
-
-    // Si la dirección no tiene transacciones, Tatum devuelve 404
-    if (txRes.status === 404) {
-      console.log(`ℹ️ La dirección ${address} no tiene transacciones en ${chain}`);
-      return NextResponse.json({ deposits: [], balance: '0', currentBlockHeight: currentBlock });
-    }
-
-    if (!txRes.ok) {
-      const errText = await txRes.text();
-      console.error(`❌ Error obteniendo transacciones: ${txRes.status} - ${errText}`);
-      throw new Error(`Error Tatum (txs): ${txRes.status}`);
-    }
-
-    const transactions = await txRes.json();
-
-    if (!Array.isArray(transactions) || transactions.length === 0) {
-      console.log(`ℹ️ No se encontraron transacciones para ${address}`);
-      return NextResponse.json({ deposits: [], balance: '0', currentBlockHeight: currentBlock });
-    }
-
-    console.log(`📋 Transacciones encontradas: ${transactions.length}`);
 
     // 3. Procesar las transacciones
     const deposits = [];
     let totalConfirmedBalance = 0;
 
     for (const tx of transactions) {
-      // Verificar si la dirección está en los outputs (es un ingreso)
-      const isIncoming = tx.outputs?.some((out: any) => out.address === address);
-      
-      if (!isIncoming) {
-        continue; // Ignorar transacciones salientes
-      }
-
-      // Calcular el valor total recibido en esta dirección
-      let receivedValue = 0;
-      tx.outputs?.forEach((out: any) => {
-        if (out.address === address) {
-          receivedValue += parseFloat(out.value || 0);
-        }
-      });
-
-      // Si no se recibió nada, saltar
-      if (receivedValue <= 0) continue;
-
-      // Calcular confirmaciones
-      const txBlock = tx.blockNumber || 0;
+      // En v4, el valor para UTXO se encuentra en 'value' (en la unidad mínima)
+      // y el bloque en 'blockNumber'. Si no hay blockNumber, está pendiente.
+      const blockHeight = tx.blockNumber;
       let confirmations = 0;
-      if (txBlock > 0) {
-        confirmations = currentBlock - txBlock + 1;
+      if (typeof blockHeight === 'number' && blockHeight > 0) {
+        confirmations = currentBlock - blockHeight + 1;
       }
+      
+      // Solo consideramos transacciones que nos han enviado (valor positivo)
+      // La v4 ya filtra por 'incoming' si se especifica, pero aquí verificamos.
+      const value = parseFloat(tx.value || 0);
+      if (value <= 0) continue;
 
-      // Consideramos confirmado a partir de 1 confirmación
       const status = confirmations >= 1 ? 'confirmed' : 'pending';
+      const amount = (value / 1e8).toFixed(8); // Litecoin tiene 8 decimales
 
-      // Formatear cantidad (dividir por 10^8 para UTXO)
-      const decimals = 8;
-      const amount = (receivedValue / Math.pow(10, decimals)).toFixed(8);
-
-      // Sumar al saldo total solo si está confirmada
       if (status === 'confirmed') {
-        totalConfirmedBalance += receivedValue / Math.pow(10, decimals);
+        totalConfirmedBalance += value / 1e8;
       }
-
-      console.log(`  → ${amount} ${upperSymbol} | Confirmaciones: ${confirmations} | ${status} | Hash: ${tx.hash?.substring(0, 10)}...`);
 
       deposits.push({
         symbol: upperSymbol,
@@ -145,16 +96,12 @@ export async function POST(request: Request) {
         hash: tx.hash,
         status,
         confirmations,
-        timestamp: tx.time ? tx.time * 1000 : Date.now(),
+        timestamp: tx.timestamp ? tx.timestamp * 1000 : Date.now(),
       });
     }
 
-    // Ordenar por fecha descendente (más reciente primero)
+    // Ordenar por fecha descendente
     deposits.sort((a, b) => b.timestamp - a.timestamp);
-
-    const duration = Date.now() - startTime;
-    console.log(`✅ Verificación completada en ${duration}ms. Depósitos: ${deposits.length} | Saldo confirmado: ${totalConfirmedBalance.toFixed(8)} ${upperSymbol}`);
-    console.log(`========================================\n`);
 
     return NextResponse.json({
       deposits,
@@ -163,8 +110,7 @@ export async function POST(request: Request) {
     });
 
   } catch (error: any) {
-    console.error('🔥 [ERROR CRÍTICO] en check-deposits:', error.message);
-    console.log(`========================================\n`);
+    console.error('🔥 [Error Crítico] en check-deposits (v4):', error.message);
     return NextResponse.json(
       { error: error.message || 'Error interno verificando depósitos' },
       { status: 500 }
