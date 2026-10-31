@@ -21,10 +21,19 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await signInWithEmailAndPassword(auth, email, password);
-      // Si el usuario tiene 2FA, Firebase pedirá el código automáticamente.
-      router.push("/explore"); // o /wallet
+      // Si el inicio de sesión es correcto, vamos al Overview
+      router.push("/overview");
     } catch (err: any) {
-      setError(err.message || "Error al iniciar sesión");
+      // Manejo de errores comunes de Firebase
+      let errorMessage = "Error al iniciar sesión";
+      if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password") {
+        errorMessage = "Correo o contraseña incorrectos.";
+      } else if (err.code === "auth/user-not-found") {
+        errorMessage = "No existe una cuenta con este correo.";
+      } else if (err.code === "auth/too-many-requests") {
+        errorMessage = "Demasiados intentos fallidos. Inténtalo más tarde.";
+      }
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -83,7 +92,9 @@ export default function LoginPage() {
         </div>
 
         {error && (
-          <p className="text-xs text-red-400">{error}</p>
+          <div className="rounded-lg bg-red-500/10 p-3 text-xs text-red-400 border border-red-500/20">
+            {error}
+          </div>
         )}
 
         <motion.button
@@ -100,7 +111,7 @@ export default function LoginPage() {
 
       <div className="mt-6 flex items-center justify-center gap-1 text-xs text-slate-400">
         <ShieldCheck size={14} className="text-emerald-400" />
-        <span>Protegido con 2FA obligatorio</span>
+        <span>Protegido con 2FA</span>
       </div>
 
       <p className="mt-6 text-center text-sm text-slate-400">
