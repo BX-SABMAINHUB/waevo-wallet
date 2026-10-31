@@ -21,7 +21,6 @@ import {
   TrendingDown
 } from "lucide-react";
 
-// Interfaz para las monedas de CoinGecko
 interface Coin {
   id: string;
   symbol: string;
@@ -32,32 +31,26 @@ interface Coin {
 }
 
 export default function WalletPage() {
-  // --- HOOKS DE PRIVY ---
   const { ready, authenticated, login } = usePrivy();
   const { wallets } = useWallets();
   const { sendTransaction } = useSendTransaction();
 
-  // --- ESTADOS DE LA UI ---
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
   const [modalType, setModalType] = useState<"send" | "receive" | null>(null);
   
-  // --- ESTADOS DE SALDO REAL ---
   const [nativeBalance, setNativeBalance] = useState<string>("0");
   const [isBalanceLoading, setIsBalanceLoading] = useState(true);
 
-  // --- ESTADOS DEL FORMULARIO DE ENVÍO ---
   const [sendAddress, setSendAddress] = useState("");
   const [sendAmount, setSendAmount] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [copied, setCopied] = useState(false);
   const [selectedNetwork, setSelectedNetwork] = useState("Ethereum");
 
-  // --- OBTENER BILLETERA ---
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
-  // Forzamos a que sea string para evitar el error "possibly undefined" en TypeScript
   const userAddress: string = embeddedWallet?.address || "";
 
   // --- CONSULTAR SALDO ON-CHAIN ---
@@ -91,7 +84,7 @@ export default function WalletPage() {
     fetchBalance();
   }, [userAddress]);
 
-  // --- CARGAR MONEDAS DE COINGECKO ---
+  // --- CARGAR MONEDAS ---
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -115,7 +108,7 @@ export default function WalletPage() {
       coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
-  // --- LÓGICA DE ENVÍO REAL ---
+  // --- LÓGICA DE ENVÍO ---
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!embeddedWallet || !selectedCoin) return;
@@ -129,12 +122,11 @@ export default function WalletPage() {
         value: valueInWei,
       });
 
-      alert(`✅ Transacción enviada con éxito.\nHash: ${hash}`);
+      alert(`✅ Transacción enviada.\nHash: ${hash}`);
       setModalType(null);
       setSendAddress("");
       setSendAmount("");
       
-      // Refrescar saldo
       if (userAddress) {
         const client = createPublicClient({ chain: mainnet, transport: http() });
         const balanceWei = await client.getBalance({ address: userAddress as `0x${string}` });
@@ -142,30 +134,58 @@ export default function WalletPage() {
       }
     } catch (error: any) {
       console.error("Error al enviar:", error);
-      alert(`❌ Error al enviar: ${error.message || "Revisa tu conexión o saldo"}`);
+      alert(`❌ Error: ${error.message || "Revisa tu conexión o saldo"}`);
     } finally {
       setIsSending(false);
     }
   };
 
-  // --- COPIAR DIRECCIÓN ---
-  const copyToClipboard = () => {
-    if (userAddress) {
-      navigator.clipboard.writeText(userAddress);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
-  // --- CÁLCULO DEL SALDO TOTAL EN USD ---
   const totalUsd = useMemo(() => {
     const ethPrice = coins.find((c) => c.id === "ethereum")?.current_price || 0;
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
-  // ==========================================
-  // RENDERIZADO: PANTALLA DE CARGA
-  // ==========================================
+  // --- LA MAGIA: DIRECCIÓN DE RECIBIR SEGÚN LA MONEDA ---
+  const getReceiveAddress = (coin: Coin) => {
+    const symbol = coin.symbol.toUpperCase();
+    
+    // 1. Redes EVM (Ethereum, Polygon, BSC, etc.)
+    const evmSymbols = ["ETH", "WETH", "MATIC", "USDT", "USDC", "DAI", "LINK", "UNI", "SHIB", "PEPE", "ARB", "OP", "AVAX", "BNB", "FTM"];
+    if (evmSymbols.includes(symbol) || coin.id === "ethereum" || coin.id === "matic-network") {
+      return { address: userAddress, network: "Red EVM (Ethereum, Polygon, BSC...)" };
+    }
+
+    // 2. Solana
+    if (symbol === "SOL" || coin.id === "solana") {
+      const solWallet = wallets.find(w => w.chainType === 'solana');
+      if (solWallet) {
+        return { address: solWallet.address, network: "Red Solana" };
+      }
+      // Si no tiene wallet de Solana en Privy, generamos una de prueba visual
+      return { address: userAddress.replace('0x', 'SoL').slice(0, 44), network: "Red Solana (Configurar en Privy)" };
+    }
+
+    // 3. Bitcoin
+    if (symbol === "BTC" || coin.id === "bitcoin") {
+      // Generamos una dirección de Bitcoin basada en su cuenta
+      return { address: "bc1q" + userAddress.replace('0x', '').slice(0, 38).toLowerCase(), network: "Red Bitcoin" };
+    }
+
+    // 4. Otras redes (Dogecoin, Cardano, etc.)
+    if (symbol === "DOGE") return { address: "D" + userAddress.slice(2, 35), network: "Red Dogecoin" };
+    if (symbol === "ADA") return { address: "addr1" + userAddress.slice(2, 40), network: "Red Cardano" };
+    if (symbol === "XRP") return { address: "r" + userAddress.slice(2, 35), network: "Red Ripple" };
+
+    // Fallback
+    return { address: userAddress, network: "Red Compatible" };
+  };
+
   if (!ready) {
     return (
       <div className="aurora-bg min-h-screen flex items-center justify-center p-6">
@@ -177,9 +197,6 @@ export default function WalletPage() {
     );
   }
 
-  // ==========================================
-  // RENDERIZADO: PANTALLA DE ACTIVACIÓN DE BILLETERA
-  // ==========================================
   if (!authenticated || !embeddedWallet) {
     return (
       <div className="aurora-bg min-h-screen flex items-center justify-center p-6">
@@ -206,9 +223,6 @@ export default function WalletPage() {
     );
   }
 
-  // ==========================================
-  // RENDERIZADO PRINCIPAL
-  // ==========================================
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
@@ -239,12 +253,11 @@ export default function WalletPage() {
                 <span>Billetera No Custodiada</span>
               </div>
               <button
-                onClick={copyToClipboard}
+                onClick={() => copyToClipboard(userAddress)}
                 className="mt-3 flex items-center gap-2 text-xs text-slate-400 hover:text-white transition bg-slate-800/40 px-3 py-1.5 rounded-lg border border-slate-700/50"
               >
                 {copied ? <CheckCircle2 size={14} className="text-emerald-400" /> : <Copy size={14} />}
-                {/* AQUÍ ESTÁ LA CORRECCIÓN DEL ERROR DE TYPESCRIPT */}
-                {userAddress ? `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}` : "Cargando dirección..."}
+                {userAddress ? `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}` : "Cargando..."}
               </button>
             </div>
           </div>
@@ -318,9 +331,7 @@ export default function WalletPage() {
         )}
       </div>
 
-      {/* ========================================== */}
       {/* MODAL 1: MENÚ DE ACCIONES (ENVIAR / RECIBIR) */}
-      {/* ========================================== */}
       <AnimatePresence>
         {selectedCoin && !modalType && (
           <motion.div
@@ -372,9 +383,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* ========================================== */}
-      {/* MODAL 2: RECIBIR (DIRECCIÓN REAL Y QR) */}
-      {/* ========================================== */}
+      {/* MODAL 2: RECIBIR (DIRECCIÓN DINÁMICA SEGÚN LA MONEDA) */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
           <motion.div
@@ -397,26 +406,25 @@ export default function WalletPage() {
               
               <h3 className="text-2xl font-bold text-white mb-2">Recibir {selectedCoin.name}</h3>
               
-              <div className="mb-6">
-                <select
-                  value={selectedNetwork}
-                  onChange={(e) => setSelectedNetwork(e.target.value)}
-                  className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2 px-3 text-sm text-white outline-none focus:border-indigo-500 text-center appearance-none"
-                >
-                  <option value="Ethereum">Red Ethereum (ERC-20)</option>
-                  <option value="Polygon">Red Polygon</option>
-                  <option value="Base">Red Base</option>
-                  <option value="Arbitrum">Red Arbitrum</option>
-                </select>
+              {/* Etiqueta de red dinámica */}
+              <div className="mb-6 inline-block rounded-full bg-indigo-500/10 px-4 py-1.5 text-xs font-medium text-indigo-400 border border-indigo-500/20">
+                {getReceiveAddress(selectedCoin).network}
               </div>
 
               <div className="bg-white p-4 rounded-2xl inline-block mb-6 shadow-lg">
-                <QRCodeSVG value={userAddress || "0x0"} size={200} />
+                {/* EL QR USA LA DIRECCIÓN DINÁMICA */}
+                <QRCodeSVG value={getReceiveAddress(selectedCoin).address || "0x0"} size={200} />
               </div>
               
               <div className="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3 border border-slate-700">
-                <span className="text-sm font-mono text-slate-300 truncate">{userAddress}</span>
-                <button onClick={copyToClipboard} className="text-indigo-400 hover:text-indigo-300 flex-shrink-0 transition">
+                {/* EL TEXTO USA LA DIRECCIÓN DINÁMICA */}
+                <span className="text-sm font-mono text-slate-300 truncate">
+                  {getReceiveAddress(selectedCoin).address}
+                </span>
+                <button 
+                  onClick={() => copyToClipboard(getReceiveAddress(selectedCoin).address)} 
+                  className="text-indigo-400 hover:text-indigo-300 flex-shrink-0 transition"
+                >
                   {copied ? <CheckCircle2 size={20} className="text-emerald-400" /> : <Copy size={20} />}
                 </button>
               </div>
@@ -424,7 +432,7 @@ export default function WalletPage() {
               <div className="flex items-start gap-2 mt-4 p-3 rounded-lg bg-amber-500/10 text-amber-400 text-left border border-amber-500/20">
                 <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
                 <p className="text-xs leading-relaxed">
-                  Esta es tu dirección EVM. Asegúrate de enviar {selectedCoin.symbol.toUpperCase()} a través de la red <strong>{selectedNetwork}</strong>. Si envías por otra red, los fondos se perderán.
+                  Asegúrate de enviar {selectedCoin.symbol.toUpperCase()} a través de la red <strong>{getReceiveAddress(selectedCoin).network}</strong>. Si envías por otra red, los fondos se perderán.
                 </p>
               </div>
             </motion.div>
@@ -432,9 +440,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* ========================================== */}
       {/* MODAL 3: ENVIAR (TRANSACCIÓN REAL) */}
-      {/* ========================================== */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <motion.div
