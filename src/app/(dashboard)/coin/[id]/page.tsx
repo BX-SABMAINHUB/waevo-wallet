@@ -14,7 +14,7 @@ export default async function CoinPage({ params }: CoinPageProps) {
           {id.replace(/-/g, " ")}
         </h1>
         <div className="rounded-2xl glass p-4 md:p-6">
-          {/* El componente del gráfico es un Client Component */}
+          {/* Usamos el nuevo componente de Highcharts */}
           <HighchartsStockChart coinId={id} />
         </div>
       </div>
