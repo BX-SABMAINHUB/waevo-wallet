@@ -1,23 +1,13 @@
-import { HighchartsStockChart } from "@/components/charts/HighchartsStockChart";
+import CoinPageClient from "./CoinPageClient";
 
 interface CoinPageProps {
   params: Promise<{ id: string }>;
 }
 
 export default async function CoinPage({ params }: CoinPageProps) {
+  // En Next.js 15, params es una promesa, por lo que debemos usar await
   const { id } = await params;
 
-  return (
-    <div className="aurora-bg min-h-screen p-6 md:p-10">
-      <div className="mx-auto max-w-5xl">
-        <h1 className="mb-6 text-3xl font-bold capitalize">
-          {id.replace(/-/g, " ")}
-        </h1>
-        <div className="rounded-2xl glass p-4 md:p-6">
-          {/* Usamos el nuevo componente de Highcharts */}
-          <HighchartsStockChart coinId={id} />
-        </div>
-      </div>
-    </div>
-  );
+  // Renderizamos el componente cliente pasándole el ID
+  return <CoinPageClient id={id} />;
 }
