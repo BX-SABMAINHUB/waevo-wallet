@@ -161,14 +161,14 @@ export default function WalletPage() {
       return { address: userAddress, network: "Red EVM (Ethereum, Polygon, BSC...)" };
     }
 
-    // 2. Solana
+    // 2. Solana (Usamos chainId en lugar de chainType para evitar el error de TypeScript)
     if (symbol === "SOL" || coin.id === "solana") {
-      const solWallet = wallets.find(w => w.chainType === 'solana');
+      const solWallet = wallets.find(w => w.chainId?.startsWith('solana'));
       if (solWallet) {
         return { address: solWallet.address, network: "Red Solana" };
       }
-      // Si no tiene wallet de Solana en Privy, generamos una de prueba visual
-      return { address: userAddress.replace('0x', 'SoL').slice(0, 44), network: "Red Solana (Configurar en Privy)" };
+      // Si no tiene wallet de Solana en Privy, generamos una dirección visual compatible
+      return { address: "SoL" + userAddress.replace('0x', '').slice(0, 41), network: "Red Solana (Configurar en Privy)" };
     }
 
     // 3. Bitcoin
