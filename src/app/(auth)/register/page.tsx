@@ -46,7 +46,6 @@ export default function RegisterPage() {
       // 3. Pasar a la pantalla de verificación
       setStep("verify");
     } catch (err: any) {
-      // Manejar errores comunes de Firebase (ej. correo ya en uso)
       let errorMessage = err.message || "Error al crear la cuenta";
       if (err.code === "auth/email-already-in-use") {
         errorMessage = "Este correo electrónico ya está registrado.";
@@ -70,8 +69,8 @@ export default function RegisterPage() {
       await auth.currentUser.reload();
       
       if (auth.currentUser.emailVerified) {
-        // ¡Correo verificado! Redirigimos al dashboard/billetera
-        router.push("/explore");
+        // ¡Correo verificado! Redirigimos al Overview
+        router.push("/overview");
       } else {
         setError("Aún no has verificado tu correo. Revisa tu bandeja de entrada o spam.");
       }
@@ -82,6 +81,7 @@ export default function RegisterPage() {
     }
   };
 
+  // PANTALLA DE VERIFICACIÓN
   if (step === "verify") {
     return (
       <motion.div
@@ -113,6 +113,7 @@ export default function RegisterPage() {
     );
   }
 
+  // PANTALLA DEL FORMULARIO DE REGISTRO
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
