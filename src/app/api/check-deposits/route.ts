@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-// Mapeo de símbolos a los slugs de Blockchair
+// Mapeo de símbolos a los identificadores de cadena de Blockchair
 const BLOCKCHAIR_CHAIN_MAP: Record<string, string> = {
   BTC: 'bitcoin',
   LTC: 'litecoin',
@@ -8,8 +8,11 @@ const BLOCKCHAIR_CHAIN_MAP: Record<string, string> = {
   BCH: 'bitcoin-cash',
   ETH: 'ethereum',
   MATIC: 'polygon',
-  // Añade más cadenas UTXO o EVM según necesites
+  // Puedes añadir más cadenas UTXO o EVM aquí
 };
+
+// Límite de transacciones a procesar para no exceder el límite de la API
+const MAX_TRANSACTIONS_TO_PROCESS = 10;
 
 export async function POST(request: Request) {
   try {
@@ -22,56 +25,83 @@ export async function POST(request: Request) {
     const chain = BLOCKCHAIR_CHAIN_MAP[upperSymbol];
 
     if (!chain) {
-      return NextResponse.json({ error: `Red no soportada para ${upperSymbol}` }, { status: 400 });
+      return NextResponse.json(
+        { error: `Red no soportada para ${upperSymbol}` },
+        { status: 400 }
+      );
     }
 
-    // Consultamos el dashboard de la dirección con los detalles de las transacciones
-    const url = `https://api.blockchair.com/${chain}/dashboards/address/${address}?transaction_details=true&limit=20`;
-    
-    const res = await fetch(url, {
-      // Blockchair permite 1440 peticiones/día sin clave, suficiente para pruebas
-      headers: { 'Accept': 'application/json' },
+    // 1. Construir la URL correcta del dashboard de la dirección
+    // El parámetro 'transaction_details=true' no es estándar. Usamos 'limit' para paginar.
+    const url = new URL(`https://api.blockchair.com/${chain}/dashboards/address/${address}`);
+    url.searchParams.append('limit', MAX_TRANSACTIONS_TO_PROCESS.toString());
+
+    // 2. Hacer la petición a Blockchair
+    const res = await fetch(url.toString(), {
+      headers: {
+        'Accept': 'application/json',
+        // Opcional: Si tienes una API key de Blockchair, añádela aquí como variable de entorno
+        // 'Authorization': `Bearer ${process.env.BLOCKCHAIR_API_KEY}`,
+      },
     });
 
+    // 3. Manejo de errores de la API (límite de tasa, etc.)
     if (!res.ok) {
       const errorText = await res.text();
-      throw new Error(`Blockchair error: ${res.status} - ${errorText}`);
+      console.error(`[Blockchair] Error ${res.status}: ${errorText}`);
+      
+      if (res.status === 402) { // Límite de peticiones excedido
+        return NextResponse.json(
+          { error: 'Límite de peticiones a Blockchair excedido. Inténtalo más tarde.' },
+          { status: 429 }
+        );
+      }
+      throw new Error(`Error en Blockchair: ${res.status}`);
     }
 
     const data = await res.json();
-    const addressData = data.data[address];
+    const addressData = data.data?.[address];
 
     if (!addressData) {
-      return NextResponse.json({ deposits: [], balance: '0', message: 'Dirección no encontrada' });
+      return NextResponse.json({
+        deposits: [],
+        balance: '0',
+        message: 'Dirección no encontrada en Blockchair',
+      });
     }
 
-    // 1. Obtener el saldo real de la dirección (en la unidad más pequeña)
-    const balanceRaw = addressData.address.balance;
-    const decimals = chain === 'ethereum' || chain === 'polygon' ? 18 : 8;
+    // 4. Obtener el saldo real (en la unidad más pequeña)
+    const balanceRaw = addressData.address?.balance || '0';
+    // Blockchair devuelve el saldo en la unidad mínima (satoshis, wei, etc.)
+    // Para UTXO: 8 decimales. Para EVM: 18 decimales.
+    const decimals = (chain === 'ethereum' || chain === 'polygon') ? 18 : 8;
     const balance = (parseFloat(balanceRaw) / Math.pow(10, decimals)).toFixed(8);
 
-    // 2. Obtener la altura actual de la blockchain para calcular confirmaciones
-    const currentBlockHeight = data.context.state;
+    // 5. Obtener la altura actual de la blockchain para calcular confirmaciones
+    const currentBlockHeight = data.context?.state;
+    if (typeof currentBlockHeight !== 'number') {
+      throw new Error('No se pudo obtener la altura actual de la blockchain');
+    }
 
-    // 3. Procesar transacciones
+    // 6. Procesar las transacciones
     const transactions = addressData.transactions || [];
     const deposits = transactions.map((tx: any) => {
-      // Si la transacción no está en un bloque (block_id = -1 o 0), está pendiente
+      // 'block_id' es la altura del bloque donde se incluyó la transacción
       const blockId = tx.block_id;
       let confirmations = 0;
-      
-      if (blockId > 0) {
-        // Fórmula oficial de Blockchair para UTXO: confirmations = state - block_id + 1
-        confirmations = currentBlockHeight - blockId + 1;
+
+      // Si block_id > 0, la transacción está minada. Calculamos las confirmaciones.
+      if (typeof blockId === 'number' && blockId > 0) {
+        confirmations = currentBlockHeight - blockId + 1; // Fórmula oficial
       }
+      // Si block_id es 0 o negativo, la transacción está pendiente (en mempool)
+      
+      // Consideramos confirmado si tiene al menos 1 confirmación
+      const status = confirmations >= 1 ? 'confirmed' : 'pending';
 
-      // Consideramos confirmado si tiene al menos 1 confirmación (o 3 para seguridad)
-      const requiredConfirmations = 3; 
-      const status = confirmations >= requiredConfirmations ? 'confirmed' : 'pending';
-
-      // Calcular el valor recibido (balance_change suele ser el valor neto para esa dirección)
-      const value = tx.balance_change || 0;
-      const amount = (parseFloat(value) / Math.pow(10, decimals)).toFixed(8);
+      // El valor neto del cambio de balance para esta dirección
+      const valueRaw = tx.balance_change || 0;
+      const amount = (parseFloat(valueRaw) / Math.pow(10, decimals)).toFixed(8);
 
       return {
         symbol: upperSymbol,
@@ -83,17 +113,17 @@ export async function POST(request: Request) {
       };
     });
 
-    // 4. Devolver todo: depósitos, saldo y altura del bloque
-    return NextResponse.json({ 
-      deposits, 
-      balance, 
-      currentBlockHeight 
+    // 7. Devolver la respuesta exitosa
+    return NextResponse.json({
+      deposits,
+      balance, // Saldo total actual de la dirección
+      currentBlockHeight,
     });
 
   } catch (error: any) {
-    console.error('Error en check-deposits (Blockchair):', error);
+    console.error('🔥 [Error Crítico] en check-deposits (Blockchair):', error);
     return NextResponse.json(
-      { error: error.message || 'Error interno verificando depósitos' }, 
+      { error: error.message || 'Error interno verificando depósitos' },
       { status: 500 }
     );
   }
