@@ -19,7 +19,7 @@ export function TradingViewWidget({ symbol }: { symbol: string }) {
       interval: "D",
       timezone: "Etc/UTC",
       theme: "dark",
-      style: "1", // Velas japonesas
+      style: "1",
       locale: "es",
       enable_publishing: false,
       allow_symbol_change: true,
