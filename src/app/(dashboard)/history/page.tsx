@@ -85,13 +85,17 @@ export default function HistoryPage() {
 
     setIsGeneratingAddress(true);
     try {
+      const xpubKey = `waevo_xpub_${coin.symbol.toUpperCase()}`;
+      const savedXpub = localStorage.getItem(xpubKey);
+
       const res = await fetch('/api/generate-address', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: coin.symbol, userId: uid }),
+        body: JSON.stringify({ symbol: coin.symbol, userId: uid, xpub: savedXpub }),
       });
       const data = await res.json();
       if (data.address) {
+        if (data.xpub) localStorage.setItem(xpubKey, data.xpub);
         setDepositAddresses(prev => ({ ...prev, [coin.id]: data.address }));
       }
     } catch (error) {
