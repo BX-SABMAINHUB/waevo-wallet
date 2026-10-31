@@ -3,11 +3,10 @@
 import { useState, useEffect, useRef } from "react";
 import { useWallets, usePrivy } from "@privy-io/react-auth";
 import { motion, AnimatePresence } from "@/components/motion-client";
-import { doc, getDoc, setDoc } from "firebase/firestore";
-import { db, auth } from "@/lib/firebase";
+import { auth } from "@/lib/firebase";
 import { 
-  History, RefreshCw, CheckCircle2, Clock, Wallet, 
-  Loader2, AlertCircle, Search, ChevronDown, Coins
+  RefreshCw, CheckCircle2, Clock, Wallet, 
+  Loader2, AlertCircle, Search, ChevronDown
 } from "lucide-react";
 
 interface Coin {
@@ -30,8 +29,7 @@ export default function HistoryPage() {
   const { ready } = usePrivy();
   const { wallets } = useWallets();
   const embeddedWallet = wallets.find(w => w.walletClientType === 'privy');
-  const userAddress = embeddedWallet?.address || '';
-  const uid = auth.currentUser?.uid;
+  const uid = auth.currentUser?.uid || "";
 
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
@@ -87,30 +85,13 @@ export default function HistoryPage() {
 
     setIsGeneratingAddress(true);
     try {
-      // 1. Buscar en Firestore
-      const docRef = doc(db, "users", uid, "wallets", coin.id);
-      const docSnap = await getDoc(docRef);
-      
-      if (docSnap.exists()) {
-        setDepositAddresses(prev => ({ ...prev, [coin.id]: docSnap.data().address }));
-        return;
-      }
-
-      // 2. Si no existe, generar y guardar
       const res = await fetch('/api/generate-address', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: coin.symbol }),
+        body: JSON.stringify({ symbol: coin.symbol, userId: uid }),
       });
       const data = await res.json();
-      
       if (data.address) {
-        await setDoc(docRef, { 
-          address: data.address, 
-          symbol: coin.symbol, 
-          name: coin.name,
-          createdAt: new Date().toISOString()
-        });
         setDepositAddresses(prev => ({ ...prev, [coin.id]: data.address }));
       }
     } catch (error) {
