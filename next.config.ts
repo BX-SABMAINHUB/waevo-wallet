@@ -1,10 +1,13 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Excluye explícitamente 'lightweight-charts' del bundle del servidor.
-  // Esto evita que Next.js intente ejecutar la librería (y su createContext)
-  // durante el build en Node.js.
-  serverExternalPackages: ["lightweight-charts"],
+  webpack: (config, { isServer }) => {
+    if (isServer) {
+      // Obliga a Webpack a ignorar la librería en el bundle del servidor
+      config.resolve.alias["lightweight-charts"] = false;
+    }
+    return config;
+  },
 };
 
 export default nextConfig;
