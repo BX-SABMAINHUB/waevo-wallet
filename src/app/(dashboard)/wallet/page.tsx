@@ -6,8 +6,7 @@ import { createPublicClient, http, formatEther, parseEther } from "viem";
 import { mainnet } from "viem/chains";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
-import { doc, getDoc, setDoc } from "firebase/firestore";
-import { db, auth } from "@/lib/firebase";
+import { auth } from "@/lib/firebase";
 import { 
   Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, 
   ShieldCheck, Wallet, AlertCircle, Loader2, TrendingUp, TrendingDown
@@ -47,7 +46,7 @@ export default function WalletPage() {
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const userAddress: string = embeddedWallet?.address || "";
-  const uid = auth.currentUser?.uid;
+  const uid = auth.currentUser?.uid || "";
 
   useEffect(() => {
     if (!userAddress) {
@@ -121,11 +120,11 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
-  // --- GENERACIÓN / LECTURA DE DIRECCIÓN PERMANENTE ---
+  // --- GENERACIÓN DE DIRECCIÓN DETERMINISTA (PERMANENTE) ---
   const handleOpenReceive = async (coin: Coin) => {
     if (!embeddedWallet || !uid) return;
 
-    // 1. Si ya la tenemos en memoria, la usamos
+    // Si ya tenemos la dirección en memoria, la usamos
     if (depositAddresses[coin.id]) {
       setSelectedCoin(coin);
       setModalType("receive");
@@ -134,35 +133,14 @@ export default function WalletPage() {
 
     setIsGeneratingAddress(true);
     try {
-      // 2. Buscamos si ya existe en Firestore
-      const docRef = doc(db, "users", uid, "wallets", coin.id);
-      const docSnap = await getDoc(docRef);
-
-      if (docSnap.exists()) {
-        const savedAddress = docSnap.data().address;
-        setDepositAddresses(prev => ({ ...prev, [coin.id]: savedAddress }));
-        setSelectedCoin(coin);
-        setModalType("receive");
-        return;
-      }
-
-      // 3. Si no existe, la generamos con el backend
       const res = await fetch('/api/generate-address', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: coin.symbol }),
+        body: JSON.stringify({ symbol: coin.symbol, userId: uid }),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Error generando dirección');
-
-      // 4. La guardamos en Firestore para que sea permanente
-      await setDoc(docRef, { 
-        address: data.address, 
-        symbol: coin.symbol, 
-        name: coin.name,
-        createdAt: new Date().toISOString()
-      });
 
       setDepositAddresses(prev => ({ ...prev, [coin.id]: data.address }));
       setSelectedCoin(coin);
@@ -177,9 +155,8 @@ export default function WalletPage() {
 
   const getReceiveAddressForModal = () => {
     if (!selectedCoin) return { address: "", network: "" };
-    const address = depositAddresses[selectedCoin.id];
     return { 
-      address: address || "", 
+      address: depositAddresses[selectedCoin.id] || "", 
       network: `Red ${selectedCoin.name}` 
     };
   };
@@ -246,7 +223,7 @@ export default function WalletPage() {
         </div>
       </div>
 
-      {/* MODAL 1: ACCIONES */}
+      {/* MODAL ACCIONES */}
       <AnimatePresence>
         {selectedCoin && !modalType && (
           <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4" onClick={() => setSelectedCoin(null)}>
@@ -265,7 +242,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* MODAL 2: RECIBIR */}
+      {/* MODAL RECIBIR */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setModalType(null)}>
@@ -288,21 +265,21 @@ export default function WalletPage() {
           </div>
         )}
       </AnimatePresence>
-      
-      {/* MODAL 3: ENVIAR (igual que antes) */}
+
+      {/* MODAL ENVIAR */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setModalType(null)}>
-             <div className="w-full max-w-md bg-slate-900 p-8 rounded-3xl text-center" onClick={(e) => e.stopPropagation()}>
-                <h3 className="text-2xl font-bold text-white mb-4">Enviar {selectedCoin.symbol}</h3>
-                <form onSubmit={handleSend} className="space-y-4">
-                  <input type="text" placeholder="Dirección" value={sendAddress} onChange={e => setSendAddress(e.target.value)} className="w-full p-3 rounded-xl bg-slate-800 text-white" />
-                  <input type="number" placeholder="Cantidad" value={sendAmount} onChange={e => setSendAmount(e.target.value)} className="w-full p-3 rounded-xl bg-slate-800 text-white" />
-                  <button type="submit" disabled={isSending} className="w-full bg-indigo-500 p-3 rounded-xl text-white font-bold">
-                    {isSending ? "Enviando..." : "Confirmar"}
-                  </button>
-                </form>
-             </div>
+            <div className="w-full max-w-md bg-slate-900 p-8 rounded-3xl" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-2xl font-bold text-white mb-4">Enviar {selectedCoin.symbol}</h3>
+              <form onSubmit={handleSend} className="space-y-4">
+                <input type="text" placeholder="Dirección" value={sendAddress} onChange={e => setSendAddress(e.target.value)} className="w-full p-3 rounded-xl bg-slate-800 text-white" />
+                <input type="number" placeholder="Cantidad" value={sendAmount} onChange={e => setSendAmount(e.target.value)} className="w-full p-3 rounded-xl bg-slate-800 text-white" />
+                <button type="submit" disabled={isSending} className="w-full bg-indigo-500 p-3 rounded-xl text-white font-bold">
+                  {isSending ? "Enviando..." : "Confirmar"}
+                </button>
+              </form>
+            </div>
           </div>
         )}
       </AnimatePresence>
