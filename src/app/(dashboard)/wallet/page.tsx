@@ -126,7 +126,6 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
-  // --- GENERACIÓN DE DIRECCIONES REALES ---
   const handleOpenReceive = async (coin: Coin) => {
     if (!embeddedWallet) return;
 
@@ -140,7 +139,7 @@ export default function WalletPage() {
     try {
       const symbol = coin.symbol.toUpperCase();
 
-      // 1. EVM y Solana: dirección real de Privy
+      // 1. EVM y Solana: usamos la dirección real de Privy
       const evmSymbols = ["ETH", "MATIC", "USDT", "USDC", "BNB", "AVAX", "ARB", "OP", "BASE"];
       if (evmSymbols.includes(symbol)) {
         setDepositAddresses(prev => ({ ...prev, [coin.id]: embeddedWallet.address }));
@@ -149,8 +148,9 @@ export default function WalletPage() {
         return;
       }
 
-      // 2. Resto de monedas: coinlib-sdk genera dirección válida
+      // 2. Resto de monedas: usamos coinlib-sdk
       const seed = `waevo-seed-${embeddedWallet.address.slice(2, 10)}`;
+      
       const config = {
         coins: symbol,
         network: "mainnet" as const,
@@ -158,15 +158,19 @@ export default function WalletPage() {
       };
 
       const coinlib = new Coinlib(config);
-      const address = await coinlib.deriveAddress(0); // Nota: es asíncrono
+      
+      // En la versión 3.2.0, deriveAddress devuelve una promesa.
+      // Usamos una aserción de tipo para evitar errores de TypeScript.
+      const derived = await (coinlib as any).deriveAddress(0);
+      const address = typeof derived === 'string' ? derived : derived.address;
 
       setDepositAddresses(prev => ({ ...prev, [coin.id]: address }));
       setSelectedCoin(coin);
       setModalType("receive");
 
     } catch (error: any) {
-      console.error("Error generando dirección:", error);
-      alert(`❌ No se pudo generar la dirección para ${coin.name}.`);
+      console.error("Error generando dirección con coinlib-sdk:", error);
+      alert(`❌ No se pudo generar la dirección para ${coin.name}. Error: ${error.message}`);
     } finally {
       setIsGeneratingAddress(false);
     }
@@ -225,6 +229,7 @@ export default function WalletPage() {
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
+        
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
