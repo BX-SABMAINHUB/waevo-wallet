@@ -18,7 +18,6 @@ export function HighchartsStockChart({ coinId }: ChartProps) {
         if (!res.ok) throw new Error("Error al obtener los datos del gráfico");
         
         const data = await res.json();
-        // Formatear datos: [timestamp, open, high, low, close]
         const formattedData = data.map((d: number[]) => [
           d[0], d[1], d[2], d[3], d[4]
         ]);
