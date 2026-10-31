@@ -24,7 +24,6 @@ export default function WalletPage() {
   const { ready, authenticated, login } = usePrivy();
   const { wallets } = useWallets();
   const { sendTransaction } = useSendTransaction();
-  // La importación ahora funcionará tras actualizar la librería
   const { createDepositAddress } = useDepositAddress();
 
   const [coins, setCoins] = useState<Coin[]>([]);
@@ -42,7 +41,6 @@ export default function WalletPage() {
   const [copied, setCopied] = useState(false);
   const [selectedNetwork, setSelectedNetwork] = useState("Ethereum");
 
-  // Estado para almacenar las direcciones de depósito generadas por Privy
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
 
@@ -128,26 +126,23 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
-  // --- FUNCIÓN PARA ABRIR EL MODAL DE RECIBIR Y GENERAR LA DIRECCIÓN REAL ---
   const handleOpenReceive = async (coin: Coin) => {
     if (!embeddedWallet) return;
-    
     if (depositAddresses[coin.id]) {
       setSelectedCoin(coin);
       setModalType("receive");
       return;
     }
-
     setIsGeneratingAddress(true);
     try {
-      // Creamos la dirección de depósito real y persistente
-      const depositAddress = await createDepositAddress({
+      await createDepositAddress({
         destinationChain: 'eip155:1',
         destinationAddress: embeddedWallet.address,
         destinationCurrency: '0x0000000000000000000000000000000000000000',
       });
-
-      setDepositAddresses(prev => ({ ...prev, [coin.id]: depositAddress }));
+      // Nota: createDepositAddress en la versión modal no devuelve la dirección directamente.
+      // La dirección se mostrará en el modal de Privy. Si usas la versión headless,
+      // generateDepositAddress sí devuelve la dirección.
       setSelectedCoin(coin);
       setModalType("receive");
     } catch (error: any) {
@@ -166,7 +161,7 @@ export default function WalletPage() {
         network: `Red de ${selectedCoin.name} (Depósito Privy)` 
       };
     }
-    return { address: "Generando dirección...", network: "Cargando" };
+    return { address: "Dirección generada en el modal de Privy", network: "Privy" };
   };
 
   if (!ready) {
@@ -404,7 +399,7 @@ export default function WalletPage() {
               <div className="flex items-start gap-2 mt-4 p-3 rounded-lg bg-amber-500/10 text-amber-400 text-left border border-amber-500/20">
                 <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
                 <p className="text-xs leading-relaxed">
-                  Esta es una dirección de depósito real y persistente generada por Privy. Puedes enviar {selectedCoin.symbol.toUpperCase()} desde cualquier billetera compatible.
+                  El modal de Privy se ha abierto para generar tu dirección de depósito única. Una vez generada, podrás recibir {selectedCoin.symbol.toUpperCase()} en ella.
                 </p>
               </div>
             </motion.div>
