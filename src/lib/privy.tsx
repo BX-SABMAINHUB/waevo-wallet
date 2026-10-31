@@ -1,3 +1,5 @@
+"use client";
+
 import { PrivyProvider } from "@privy-io/react-auth";
 
 export function PrivyWrapper({ children }: { children: React.ReactNode }) {
@@ -10,7 +12,7 @@ export function PrivyWrapper({ children }: { children: React.ReactNode }) {
         },
         appearance: {
           theme: "dark",
-          accentColor: "#6366f1", // Color de Waevo
+          accentColor: "#6366f1",
         },
       }}
     >
