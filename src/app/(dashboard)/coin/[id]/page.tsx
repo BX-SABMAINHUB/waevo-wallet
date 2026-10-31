@@ -1,6 +1,6 @@
 import dynamic from "next/dynamic";
 
-// Carga dinámica con ssr: false para que solo se ejecute en el cliente
+// La importación dinámica con ssr: false es crucial para evitar errores de SSR
 const HighchartsStockChart = dynamic(
   () => import("@/components/charts/HighchartsStockChart").then((mod) => mod.HighchartsStockChart),
   {
