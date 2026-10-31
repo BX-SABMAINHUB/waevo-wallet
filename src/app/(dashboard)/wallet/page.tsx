@@ -24,6 +24,7 @@ export default function WalletPage() {
   const { ready, authenticated, login } = usePrivy();
   const { wallets } = useWallets();
   const { sendTransaction } = useSendTransaction();
+  // La importación ahora funcionará tras actualizar la librería
   const { createDepositAddress } = useDepositAddress();
 
   const [coins, setCoins] = useState<Coin[]>([]);
@@ -131,7 +132,6 @@ export default function WalletPage() {
   const handleOpenReceive = async (coin: Coin) => {
     if (!embeddedWallet) return;
     
-    // Si ya tenemos una dirección guardada para esta moneda, la usamos
     if (depositAddresses[coin.id]) {
       setSelectedCoin(coin);
       setModalType("receive");
@@ -140,12 +140,11 @@ export default function WalletPage() {
 
     setIsGeneratingAddress(true);
     try {
-      // Usamos el hook de Privy para crear una dirección de depósito persistente.
-      // Esta dirección es real y acepta fondos en la red correspondiente.
+      // Creamos la dirección de depósito real y persistente
       const depositAddress = await createDepositAddress({
-        destinationChain: 'eip155:1', // Ethereum mainnet como destino
+        destinationChain: 'eip155:1',
         destinationAddress: embeddedWallet.address,
-        destinationCurrency: '0x0000000000000000000000000000000000000000', // ETH nativo
+        destinationCurrency: '0x0000000000000000000000000000000000000000',
       });
 
       setDepositAddresses(prev => ({ ...prev, [coin.id]: depositAddress }));
@@ -153,25 +152,20 @@ export default function WalletPage() {
       setModalType("receive");
     } catch (error: any) {
       console.error("Error generando dirección de depósito:", error);
-      alert(`❌ No se pudo generar la dirección de depósito: ${error.message || "Inténtalo de nuevo"}`);
+      alert(`❌ No se pudo generar la dirección: ${error.message || "Inténtalo de nuevo"}`);
     } finally {
       setIsGeneratingAddress(false);
     }
   };
 
-  // --- FUNCIÓN AUXILIAR PARA MOSTRAR LA DIRECCIÓN EN EL MODAL ---
   const getReceiveAddressForModal = () => {
     if (!selectedCoin) return { address: "", network: "" };
-    
-    // Si ya generamos una dirección con Privy, la usamos
     if (depositAddresses[selectedCoin.id]) {
       return { 
         address: depositAddresses[selectedCoin.id], 
         network: `Red de ${selectedCoin.name} (Depósito Privy)` 
       };
     }
-
-    // Si aún no se ha generado, mostramos un placeholder
     return { address: "Generando dirección...", network: "Cargando" };
   };
 
@@ -284,13 +278,7 @@ export default function WalletPage() {
                   key={coin.id}
                   whileHover={{ y: -4 }}
                   className="rounded-2xl glass p-5 cursor-pointer hover:border-indigo-500/40 transition group"
-                  onClick={() => {
-                    setSelectedCoin(coin);
-                    // Si la moneda no tiene dirección de depósito, la generamos al abrir el menú
-                    if (!depositAddresses[coin.id]) {
-                      // Podríamos generarla aquí, pero es mejor hacerlo al pulsar "Recibir"
-                    }
-                  }}
+                  onClick={() => setSelectedCoin(coin)}
                 >
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-3">
