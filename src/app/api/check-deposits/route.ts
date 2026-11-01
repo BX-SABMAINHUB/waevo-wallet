@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 
+// Mapeo de símbolos a las redes de Blockchair
 const BLOCKCHAIR_CHAIN_MAP: Record<string, string> = {
   BTC: 'bitcoin',
   LTC: 'litecoin',
@@ -12,6 +13,7 @@ const BLOCKCHAIR_CHAIN_MAP: Record<string, string> = {
 export async function POST(request: Request) {
   try {
     const { symbol, address } = await request.json();
+    
     if (!symbol || !address) {
       return NextResponse.json({ error: 'Faltan símbolo o dirección' }, { status: 400 });
     }
@@ -23,89 +25,79 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `Red no soportada: ${upperSymbol}` }, { status: 400 });
     }
 
-    // 1. Obtener el dashboard con transaction_details=false
+    console.log(`[Blockchair] Verificando ${chain} para la dirección: ${address}`);
+
+    // transaction_details=true es vital para obtener los objetos con block_id y balance_change
     const url = new URL(`https://api.blockchair.com/${chain}/dashboards/address/${address}`);
-    url.searchParams.append('transaction_details', 'false');
-    url.searchParams.append('limit', '50');
+    url.searchParams.append('transaction_details', 'true');
+    url.searchParams.append('limit', '50'); // Límite seguro
 
     const res = await fetch(url.toString(), {
       headers: { 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(10000), // Timeout de 10s
     });
 
     if (!res.ok) {
-      if (res.status === 402) {
-        return NextResponse.json({ error: 'Límite de consultas excedido. Espera un minuto.' }, { status: 429 });
+      if (res.status === 402 || res.status === 429) {
+        return NextResponse.json({ error: 'Límite de consultas a Blockchair excedido. Espera un minuto.' }, { status: 429 });
       }
-      throw new Error(`Blockchair respondió ${res.status}`);
+      throw new Error(`Blockchair respondió con estado ${res.status}`);
     }
 
-    const data = await res.json();
-    const addressData = data.data?.[address];
+    const json = await res.json();
+    const addressData = json.data?.[address];
 
     if (!addressData) {
+      // La dirección no tiene actividad o no existe en la red
       return NextResponse.json({ deposits: [], balance: '0' });
     }
 
-    const currentBlockHeight = data.context?.state;
+    // 1. Obtener altura actual de la red para calcular confirmaciones
+    const currentBlockHeight = json.context?.state;
     if (typeof currentBlockHeight !== 'number') {
       throw new Error('No se pudo obtener la altura de la blockchain');
     }
 
+    // 2. Calcular saldo total (en la unidad mínima, ej. satoshis)
     const balanceRaw = addressData.address?.balance || '0';
+    // 8 decimales para UTXO (BTC, LTC), 18 para EVM (ETH)
     const decimals = (chain === 'ethereum' || chain === 'polygon') ? 18 : 8;
     const balance = (parseFloat(balanceRaw) / Math.pow(10, decimals)).toFixed(8);
 
-    // 2. Obtener la lista de hashes y consultar los detalles de cada uno
-    const txHashes = addressData.transactions || [];
+    // 3. Procesar transacciones
+    const rawTxs = addressData.transactions || [];
     const deposits = [];
 
-    // Limitamos a las últimas 10 transacciones para no saturar la API de Blockchair
-    for (const hash of txHashes.slice(0, 10)) {
-      try {
-        const txUrl = `https://api.blockchair.com/${chain}/dashboards/transaction/${hash}`;
-        const txRes = await fetch(txUrl, {
-          headers: { 'Accept': 'application/json' },
-        });
+    for (const tx of rawTxs) {
+      // Solo nos interesan los ingresos (balance_change positivo)
+      const balanceChange = parseFloat(tx.balance_change || '0');
+      if (balanceChange <= 0) continue;
 
-        if (!txRes.ok) continue;
+      const blockId = tx.block_id;
+      let confirmations = 0;
 
-        const txData = await txRes.json();
-        const txDetails = txData.data?.[hash]?.transaction;
-        if (!txDetails) continue;
-
-        // Si el balance_change es negativo, es un pago que tú hiciste, no un ingreso
-        const change = parseFloat(txDetails.balance_change || '0');
-        if (change <= 0) continue;
-
-        const blockId = txDetails.block_id;
-        let confirmations = 0;
-        if (typeof blockId === 'number' && blockId > 0) {
-          confirmations = currentBlockHeight - blockId + 1;
-        }
-
-        const status = confirmations >= 1 ? 'confirmed' : 'pending';
-        const amount = (change / Math.pow(10, decimals)).toFixed(8);
-
-        deposits.push({
-          symbol: upperSymbol,
-          amount: amount,
-          hash: hash,
-          status,
-          confirmations,
-          timestamp: txDetails.time ? new Date(txDetails.time).getTime() : Date.now(),
-        });
-
-        // Pequeña pausa para no exceder el límite de peticiones de Blockchair
-        await new Promise(r => setTimeout(r, 150));
-
-      } catch (err) {
-        console.error(`Error consultando tx ${hash}:`, err);
+      // Si block_id es mayor que 0, la transacción está minada
+      if (typeof blockId === 'number' && blockId > 0) {
+        confirmations = currentBlockHeight - blockId + 1;
       }
+
+      const status = confirmations >= 1 ? 'confirmed' : 'pending';
+      const amount = (balanceChange / Math.pow(10, decimals)).toFixed(8);
+
+      deposits.push({
+        symbol: upperSymbol,
+        amount: amount,
+        hash: tx.hash,
+        status,
+        confirmations,
+        timestamp: tx.time ? new Date(tx.time).getTime() : Date.now(),
+      });
     }
 
-    // Ordenar por fecha descendente
-    deposits.sort((a: any, b: any) => b.timestamp - a.timestamp);
+    // Ordenar del más reciente al más antiguo
+    deposits.sort((a, b) => b.timestamp - a.timestamp);
+
+    console.log(`[Blockchair] Encontrados ${deposits.length} depósitos. Saldo: ${balance}`);
 
     return NextResponse.json({
       deposits,
@@ -114,7 +106,7 @@ export async function POST(request: Request) {
     });
 
   } catch (error: any) {
-    console.error('Error en check-deposits:', error.message);
-    return NextResponse.json({ error: error.message || 'Error interno' }, { status: 500 });
+    console.error('🔥 [Error en check-deposits]:', error.message);
+    return NextResponse.json({ error: error.message || 'Error consultando la red' }, { status: 500 });
   }
 }
