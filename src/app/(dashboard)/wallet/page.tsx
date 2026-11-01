@@ -1,16 +1,20 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useWallets, usePrivy } from "@privy-io/react-auth";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
-import { doc, onSnapshot, collection, setDoc } from "firebase/firestore";
+import { doc, onSnapshot, collection } from "firebase/firestore";
 import { db, auth } from "@/lib/firebase";
 import { 
   Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, 
-  Wallet, Loader2, TrendingUp, TrendingDown, Coins, ArrowRight
+  Wallet, Loader2, TrendingUp, TrendingDown, Coins, 
+  AlertCircle, Send, ShieldAlert, Key
 } from "lucide-react";
 
+// ==========================================
+// TIPOS E INTERFACES
+// ==========================================
 interface Coin {
   id: string;
   symbol: string;
@@ -19,6 +23,8 @@ interface Coin {
   current_price: number;
   price_change_percentage_24h: number;
 }
+
+const FEE_EUR = 0.01; // Comisión fija en Euros
 
 export default function WalletPage() {
   const { ready, authenticated, login } = usePrivy();
@@ -30,92 +36,57 @@ export default function WalletPage() {
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
-  const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
-  const [modalType, setModalType] = useState<"receive" | null>(null);
   
-  // Saldos (desde Firestore)
+  // Modales
+  const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
+  const [modalType, setModalType] = useState<"receive" | "send" | null>(null);
+  
+  // Saldos y direcciones
   const [coinBalances, setCoinBalances] = useState<Record<string, number>>({});
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Precios en tiempo real (Ticker)
-  const [livePrices, setLivePrices] = useState<Record<string, number>>({});
-  const [priceTrends, setPriceTrends] = useState<Record<string, "up" | "down" | "same">>({});
+  // Estados del formulario de envío
+  const [sendAddress, setSendAddress] = useState("");
+  const [sendAmount, setSendAmount] = useState("");
+  const [privateKey, setPrivateKey] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [sendSuccess, setSendSuccess] = useState<string | null>(null);
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const uid = auth.currentUser?.uid || "";
 
   // ==========================================
-  // 1. CARGAR PRECIOS REALES (CADA 60 SEGUNDOS)
+  // EFECTOS
   // ==========================================
+
+  // 1. Cargar precios de las monedas
   useEffect(() => {
     async function fetchCoins() {
       try {
         const res = await fetch(
-          "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false"
+          "https://api.coingecko.com/api/v3/coins/markets?vs_currency=eur&order=market_cap_desc&per_page=100&page=1&sparkline=false"
         );
         const data = await res.json();
         setCoins(data);
-        
-        // Sincronizar precios reales
-        setLivePrices(prev => {
-          const next = { ...prev };
-          data.forEach((coin: Coin) => {
-            next[coin.symbol.toUpperCase()] = coin.current_price;
-          });
-          return next;
-        });
       } catch (error) {
         console.error("Error fetching coins:", error);
       } finally {
         setLoading(false);
       }
     }
-
     fetchCoins();
-    const interval = setInterval(fetchCoins, 60000); // Actualizar precios reales cada 60s
+    
+    // Actualizar precios cada 60 segundos
+    const interval = setInterval(fetchCoins, 60000);
     return () => clearInterval(interval);
   }, []);
 
-  // ==========================================
-  // 2. TICKER EN TIEMPO REAL (CADA 1 SEGUNDO)
-  // ==========================================
-  useEffect(() => {
-    const ticker = setInterval(() => {
-      setLivePrices((prev) => {
-        const next = { ...prev };
-        const trends: Record<string, "up" | "down" | "same"> = {};
-
-        Object.keys(next).forEach((symbol) => {
-          // Simulamos una fluctuación del mercado de -0.05% a +0.05%
-          const fluctuation = (Math.random() - 0.5) * 0.001; 
-          const oldPrice = next[symbol];
-          const newPrice = oldPrice * (1 + fluctuation);
-          
-          // Redondeamos a 6 decimales para evitar errores
-          next[symbol] = Math.round(newPrice * 1000000) / 1000000;
-
-          // Determinar tendencia
-          if (newPrice > oldPrice) trends[symbol] = "up";
-          else if (newPrice < oldPrice) trends[symbol] = "down";
-          else trends[symbol] = "same";
-        });
-
-        setPriceTrends(trends);
-        return next;
-      });
-    }, 1000); // Actualiza cada 1 segundo
-
-    return () => clearInterval(ticker);
-  }, []);
-
-  // ==========================================
-  // 3. ESCUCHAR SALDOS DE FIRESTORE
-  // ==========================================
+  // 2. Escuchar saldos en tiempo real desde Firestore
   useEffect(() => {
     if (!uid) return;
-
     const balancesRef = collection(db, "users", uid, "balances");
     const unsubscribe = onSnapshot(balancesRef, (snapshot) => {
       const newBalances: Record<string, number> = {};
@@ -125,28 +96,27 @@ export default function WalletPage() {
       });
       setCoinBalances(newBalances);
     });
-
     return () => unsubscribe();
   }, [uid]);
 
   // ==========================================
-  // 4. LÓGICA DE ACCIONES
+  // LÓGICA DE ACCIONES
   // ==========================================
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Generar dirección para recibir
   const handleOpenReceive = async (coin: Coin) => {
     if (!uid) return;
-
     if (depositAddresses[coin.symbol]) {
       setSelectedCoin(coin);
       setModalType("receive");
       return;
     }
-
     setIsGeneratingAddress(true);
     try {
       const res = await fetch('/api/generate-address', {
@@ -156,7 +126,6 @@ export default function WalletPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-
       setDepositAddresses(prev => ({ ...prev, [coin.symbol]: data.address }));
       setSelectedCoin(coin);
       setModalType("receive");
@@ -167,23 +136,95 @@ export default function WalletPage() {
     }
   };
 
+  // Abrir modal de envío (solo si hay saldo)
+  const handleOpenSend = (coin: Coin) => {
+    const balance = coinBalances[coin.symbol.toUpperCase()] || 0;
+    if (balance <= 0) {
+      alert(`No tienes saldo de ${coin.symbol} para enviar.`);
+      return;
+    }
+    setSelectedCoin(coin);
+    setModalType("send");
+    setSendError(null);
+    setSendSuccess(null);
+    setSendAddress("");
+    setSendAmount("");
+    setPrivateKey("");
+  };
+
+  // Procesar el envío
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCoin) return;
+
+    setSendError(null);
+    setSendSuccess(null);
+
+    const balance = coinBalances[selectedCoin.symbol.toUpperCase()] || 0;
+    const amount = parseFloat(sendAmount);
+    
+    // Calcular comisión estimada en cripto
+    const feeCrypto = FEE_EUR / (selectedCoin.current_price || 1);
+    const totalNeeded = amount + feeCrypto;
+
+    // Validaciones
+    if (isNaN(amount) || amount <= 0) {
+      setSendError("La cantidad debe ser mayor a 0.");
+      return;
+    }
+    if (totalNeeded > balance) {
+      setSendError(`Saldo insuficiente. Necesitas ${totalNeeded.toFixed(6)} ${selectedCoin.symbol} (incluyendo la comisión de 0.01€).`);
+      return;
+    }
+    if (!privateKey.trim()) {
+      setSendError("Debes introducir la clave privada para firmar la transacción.");
+      return;
+    }
+
+    setIsSending(true);
+
+    try {
+      const res = await fetch('/api/send-transaction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: selectedCoin.symbol,
+          fromAddress: depositAddresses[selectedCoin.symbol], // La dirección asociada
+          toAddress: sendAddress,
+          amount: amount,
+          privateKey: privateKey,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Error al enviar la transacción');
+
+      // Éxito
+      setSendSuccess(`✅ Transacción enviada con éxito. Hash: ${data.txId}`);
+      setSendAmount("");
+      setSendAddress("");
+      setPrivateKey("");
+
+    } catch (error: any) {
+      setSendError(error.message || "Error al procesar el envío.");
+    } finally {
+      setIsSending(false);
+    }
+  };
+
   const filteredCoins = coins.filter(
     (coin) => coin.name.toLowerCase().includes(search.toLowerCase()) || coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
-  // ==========================================
-  // 5. CÁLCULOS EN TIEMPO REAL
-  // ==========================================
-  
-  // Calcular el valor total usando los precios en vivo
-  const totalUsd = useMemo(() => {
+  // Calcular el valor total en EUR
+  const totalEur = useMemo(() => {
     let total = 0;
     Object.entries(coinBalances).forEach(([symbol, amount]) => {
-      const price = livePrices[symbol.toUpperCase()] || 0;
-      total += amount * price;
+      const coin = coins.find(c => c.symbol.toUpperCase() === symbol.toUpperCase());
+      if (coin) total += amount * coin.current_price;
     });
     return total;
-  }, [coinBalances, livePrices]);
+  }, [coinBalances, coins]);
 
   if (!ready) return <div className="p-10 text-center text-white">Cargando entorno seguro...</div>;
 
@@ -206,23 +247,18 @@ export default function WalletPage() {
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
         
-        {/* CABECERA CON BALANCE TOTAL EN VIVO */}
+        {/* CABECERA */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-10 rounded-3xl border border-indigo-500/20 bg-gradient-to-br from-indigo-900/40 to-slate-900/80 p-8 shadow-xl relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500 rounded-full blur-[100px] opacity-20 pointer-events-none" />
-          
           <div className="relative z-10">
             <p className="text-sm font-medium text-indigo-300 mb-1 flex items-center gap-2">
-              <Coins size={16} /> Balance Total Estimado (En Vivo)
+              <Coins size={16} /> Balance Total Estimado
             </p>
-            <h1 className="text-4xl md:text-5xl font-bold text-white tracking-tight flex items-center gap-4">
-              ${totalUsd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              <span className="flex h-3 w-3 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-              </span>
+            <h1 className="text-4xl md:text-5xl font-bold text-white tracking-tight">
+              €{totalEur.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </h1>
             <p className="text-sm text-slate-400 mt-2">
-              Los precios y tu balance se actualizan en tiempo real cada segundo.
+              Este es el saldo total de todas tus monedas confirmadas.
             </p>
           </div>
         </motion.div>
@@ -240,15 +276,8 @@ export default function WalletPage() {
           {filteredCoins.map((coin) => {
             const balance = coinBalances[coin.symbol.toUpperCase()] || 0;
             const hasBalance = balance > 0;
-            const livePrice = livePrices[coin.symbol.toUpperCase()] || coin.current_price;
-            const trend = priceTrends[coin.symbol.toUpperCase()] || "same";
-            
-            // El valor de esta moneda específica en USD (en vivo)
-            const valueInUsd = balance * livePrice;
-
-            // Calcular cambio porcentual simulado (para el color verde/rojo)
             const isPositive = (coin.price_change_percentage_24h || 0) >= 0;
-
+            
             return (
               <motion.div key={coin.id} whileHover={{ y: -4 }} onClick={() => setSelectedCoin(coin)} className={`rounded-2xl glass p-5 cursor-pointer transition group ${hasBalance ? 'border-indigo-500/40 shadow-[0_0_15px_rgba(99,102,241,0.1)]' : 'hover:border-indigo-500/40'}`}>
                 <div className="flex items-center justify-between mb-4">
@@ -259,68 +288,66 @@ export default function WalletPage() {
                       <span className="text-xs uppercase text-slate-400">{coin.symbol}</span>
                     </div>
                   </div>
-                  
-                  {/* PRECIO EN VIVO CON ANIMACIÓN DE COLOR */}
                   <div className="text-right">
-                    <motion.div 
-                      key={livePrice}
-                      initial={{ color: trend === "up" ? "#34d399" : trend === "down" ? "#f87171" : "#ffffff" }}
-                      animate={{ color: "#ffffff" }}
-                      transition={{ duration: 0.5 }}
-                      className="font-medium text-white flex items-center justify-end gap-1"
-                    >
-                      ${livePrice.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
-                    </motion.div>
+                    <div className="font-medium text-white">€{coin.current_price.toLocaleString("es-ES", { minimumFractionDigits: 2 })}</div>
                     <div className={`flex items-center justify-end gap-1 text-xs font-medium ${isPositive ? "text-emerald-400" : "text-red-400"}`}>
                       {isPositive ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
                       {Math.abs(coin.price_change_percentage_24h || 0).toFixed(2)}%
                     </div>
                   </div>
                 </div>
-
                 <div className="flex items-center justify-between border-t border-slate-800 pt-3">
                   <div className="text-sm text-slate-400">Tu saldo</div>
                   <div className={`text-sm font-semibold ${hasBalance ? 'text-indigo-400' : 'text-white'}`}>
                     {balance.toFixed(4)} {coin.symbol.toUpperCase()}
                   </div>
                 </div>
-                
-                {/* VALOR ESTIMADO EN USD DE ESTA MONEDA */}
-                {hasBalance && (
-                  <div className="flex items-center justify-between pt-1">
-                    <div className="text-xs text-slate-500">Valor estimado</div>
-                    <div className="text-xs text-slate-300">
-                      ${valueInUsd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </div>
-                  </div>
-                )}
               </motion.div>
             );
           })}
         </div>
       </div>
 
-      {/* MODAL ACCIONES */}
+      {/* ========================================== */}
+      {/* MODAL 1: MENÚ DE ACCIONES (ENVIAR / RECIBIR) */}
+      {/* ========================================== */}
       <AnimatePresence>
         {selectedCoin && !modalType && (
           <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setSelectedCoin(null)}>
             <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-sm rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
               <div className="flex justify-between items-center mb-6">
-                <div className="flex items-center gap-3"><img src={selectedCoin.image} className="h-10 w-10" /><h3 className="text-xl font-bold text-white">{selectedCoin.name}</h3></div>
+                <div className="flex items-center gap-3">
+                  <img src={selectedCoin.image} className="h-10 w-10" />
+                  <h3 className="text-xl font-bold text-white">{selectedCoin.name}</h3>
+                </div>
                 <button onClick={() => setSelectedCoin(null)} className="text-slate-400 hover:text-white bg-slate-800 p-1 rounded-full"><X size={20} /></button>
               </div>
-              <div className="mb-4 text-center">
-                <p className="text-xs text-slate-400">Saldo disponible</p>
-                <p className="text-2xl font-bold text-white">{(coinBalances[selectedCoin.symbol.toUpperCase()] || 0).toFixed(4)} {selectedCoin.symbol.toUpperCase()}</p>
+              
+              <div className="mb-6 text-center bg-slate-950/50 p-4 rounded-xl border border-slate-800">
+                <p className="text-xs text-slate-400 mb-1">Saldo disponible</p>
+                <p className="text-2xl font-bold text-white">
+                  {(coinBalances[selectedCoin.symbol.toUpperCase()] || 0).toFixed(4)} <span className="text-indigo-400">{selectedCoin.symbol.toUpperCase()}</span>
+                </p>
               </div>
+
               <div className="grid grid-cols-2 gap-4">
                 <button onClick={() => handleOpenReceive(selectedCoin)} className="flex flex-col items-center gap-2 rounded-2xl bg-slate-800 p-6 hover:bg-slate-700 transition">
                   {isGeneratingAddress ? <Loader2 className="animate-spin text-emerald-400" /> : <ArrowDownLeft className="text-emerald-400" size={24} />}
                   <span className="font-semibold text-white">Recibir</span>
                 </button>
-                <button onClick={() => alert("El envío estará disponible en el Paso 2")} className="flex flex-col items-center gap-2 rounded-2xl bg-slate-800 p-6 hover:bg-slate-700 transition opacity-50 cursor-not-allowed">
-                  <ArrowUpRight className="text-indigo-400" size={24} />
-                  <span className="font-semibold text-white">Enviar</span>
+                
+                {/* BOTÓN DE ENVIAR: Deshabilitado si no hay saldo */}
+                <button 
+                  onClick={() => handleOpenSend(selectedCoin)} 
+                  disabled={(coinBalances[selectedCoin.symbol.toUpperCase()] || 0) <= 0}
+                  className={`flex flex-col items-center gap-2 rounded-2xl p-6 transition ${
+                    (coinBalances[selectedCoin.symbol.toUpperCase()] || 0) > 0 
+                      ? 'bg-slate-800 hover:bg-slate-700 cursor-pointer' 
+                      : 'bg-slate-800/50 opacity-50 cursor-not-allowed'
+                  }`}
+                >
+                  <ArrowUpRight className={(coinBalances[selectedCoin.symbol.toUpperCase()] || 0) > 0 ? "text-indigo-400" : "text-slate-500"} size={24} />
+                  <span className={`font-semibold ${(coinBalances[selectedCoin.symbol.toUpperCase()] || 0) > 0 ? 'text-white' : 'text-slate-500'}`}>Enviar</span>
                 </button>
               </div>
             </motion.div>
@@ -328,20 +355,135 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* MODAL RECIBIR */}
+      {/* ========================================== */}
+      {/* MODAL 2: RECIBIR (DIRECCIÓN REAL) */}
+      {/* ========================================== */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => setModalType(null)}>
-            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md rounded-3xl border border-slate-700 bg-slate-900 p-8 text-center shadow-2xl">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md rounded-3xl border border-slate-700 bg-slate-900 p-8 text-center shadow-2xl relative">
               <button onClick={() => setModalType(null)} className="absolute top-4 right-4 text-slate-400 hover:text-white bg-slate-800 p-2 rounded-full"><X size={20} /></button>
               <h3 className="text-2xl font-bold text-white mb-2">Recibir {selectedCoin.name}</h3>
-              <div className="bg-white p-4 rounded-2xl inline-block mb-6 shadow-lg"><QRCodeSVG value={depositAddresses[selectedCoin.symbol] || "0x0"} size={200} /></div>
+              <p className="text-sm text-slate-400 mb-6">Esta es tu dirección real y permanente.</p>
+              
+              <div className="bg-white p-4 rounded-2xl inline-block mb-6 shadow-lg">
+                <QRCodeSVG value={depositAddresses[selectedCoin.symbol] || "0x0"} size={200} />
+              </div>
+              
               <div className="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3 border border-slate-700">
                 <span className="text-sm font-mono text-slate-300 truncate">{depositAddresses[selectedCoin.symbol]}</span>
                 <button onClick={() => copyToClipboard(depositAddresses[selectedCoin.symbol])} className="text-indigo-400 hover:text-white">
                   {copied ? <CheckCircle2 size={20} className="text-emerald-400" /> : <Copy size={20} />}
                 </button>
               </div>
+              <p className="text-xs text-slate-500 mt-4">Envía únicamente {selectedCoin.symbol.toUpperCase()} a esta dirección.</p>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ========================================== */}
+      {/* MODAL 3: ENVIAR (TRANSACCIÓN REAL) */}
+      {/* ========================================== */}
+      <AnimatePresence>
+        {modalType === "send" && selectedCoin && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => setModalType(null)}>
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md rounded-3xl border border-slate-700 bg-slate-900 p-8 shadow-2xl relative">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-2xl font-bold text-white">Enviar {selectedCoin.symbol.toUpperCase()}</h3>
+                <button onClick={() => setModalType(null)} className="text-slate-400 hover:text-white bg-slate-800 p-2 rounded-full"><X size={20} /></button>
+              </div>
+
+              {/* Info de Saldo y Comisión */}
+              <div className="mb-6 flex justify-between text-xs bg-slate-950/50 p-3 rounded-lg border border-slate-800">
+                <div>
+                  <p className="text-slate-400">Disponible</p>
+                  <p className="text-white font-medium">{(coinBalances[selectedCoin.symbol.toUpperCase()] || 0).toFixed(4)} {selectedCoin.symbol}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-slate-400">Comisión de red</p>
+                  <p className="text-white font-medium">0.01 €</p>
+                </div>
+              </div>
+              
+              <form onSubmit={handleSend} className="space-y-4">
+                {/* Dirección */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Dirección del destinatario ({selectedCoin.symbol})</label>
+                  <input 
+                    type="text" 
+                    required 
+                    value={sendAddress} 
+                    onChange={e => setSendAddress(e.target.value)} 
+                    placeholder={`Dirección ${selectedCoin.symbol}...`} 
+                    className="w-full p-3 rounded-xl bg-slate-800 text-white outline-none focus:border-indigo-500 border border-slate-700 font-mono text-sm" 
+                  />
+                </div>
+
+                {/* Cantidad */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Cantidad a enviar</label>
+                  <div className="relative">
+                    <input 
+                      type="number" 
+                      step="any" 
+                      required 
+                      value={sendAmount} 
+                      onChange={e => setSendAmount(e.target.value)} 
+                      placeholder="0.00" 
+                      className="w-full p-3 rounded-xl bg-slate-800 text-white outline-none focus:border-indigo-500 border border-slate-700" 
+                    />
+                    <button 
+                      type="button"
+                      onClick={() => setSendAmount((coinBalances[selectedCoin.symbol.toUpperCase()] || 0).toString())}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-indigo-400 font-semibold"
+                    >
+                      MAX
+                    </button>
+                  </div>
+                </div>
+
+                {/* Clave Privada (Advertencia de seguridad) */}
+                <div className="bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg">
+                  <label className="flex items-center gap-2 text-xs font-medium text-amber-400 mb-2">
+                    <Key size={14} /> Clave Privada (Para firmar)
+                  </label>
+                  <input 
+                    type="password" 
+                    required 
+                    value={privateKey} 
+                    onChange={e => setPrivateKey(e.target.value)} 
+                    placeholder="Introduce tu clave privada..." 
+                    className="w-full p-3 rounded-xl bg-slate-900 text-white outline-none focus:border-amber-500 border border-slate-700 font-mono text-sm" 
+                  />
+                  <p className="text-[10px] text-amber-500/70 mt-2 flex items-start gap-1">
+                    <ShieldAlert size={12} className="mt-0.5 flex-shrink-0" />
+                    Nunca compartas tu clave privada. En producción, esto se gestiona con Tatum KMS de forma segura.
+                  </p>
+                </div>
+
+                {/* Feedback */}
+                {sendError && (
+                  <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-lg flex items-start gap-2">
+                    <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
+                    {sendError}
+                  </div>
+                )}
+                {sendSuccess && (
+                  <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs rounded-lg flex items-start gap-2">
+                    <CheckCircle2 size={14} className="flex-shrink-0 mt-0.5" />
+                    {sendSuccess}
+                  </div>
+                )}
+
+                <button 
+                  type="submit" 
+                  disabled={isSending} 
+                  className="w-full bg-gradient-to-r from-indigo-500 to-cyan-400 hover:from-indigo-600 hover:to-cyan-500 p-3 rounded-xl text-white font-bold transition disabled:opacity-50 mt-4 flex items-center justify-center gap-2"
+                >
+                  {isSending ? <><Loader2 className="animate-spin" size={18} /> Enviando...</> : <><Send size={18} /> Confirmar Envío</>}
+                </button>
+              </form>
             </motion.div>
           </div>
         )}
