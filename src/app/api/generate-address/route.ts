@@ -9,14 +9,29 @@ const NATIVE_CHAINS: Record<string, string> = {
   ALGO: 'algorand', NEAR: 'near', ATOM: 'cosmos', FLOW: 'flow', EOS: 'eos',
 };
 
-// Inicializar Firebase Admin (solo si no está inicializado)
+// Inicialización robusta de Firebase Admin
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    
+    // 🔥 CRÍTICO: Arreglar los saltos de línea de la clave privada si Vercel los guardó como texto
+    if (serviceAccount.private_key) {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      projectId: "waevo-wallet" // Forzamos el ID del proyecto por seguridad
+    });
+    console.log('✅ Firebase Admin inicializado correctamente');
   } catch (error) {
-    console.error('Error inicializando Firebase Admin:', error);
+    console.error('❌ Error inicializando Firebase Admin:', error);
   }
+}
+
+// Función para conectar a Firestore (sin parámetros extra)
+function getFirestoreInstance() {
+  return admin.firestore(); 
 }
 
 function getDeterministicIndex(userId: string, symbol: string): number {
@@ -38,8 +53,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Faltan parámetros' }, { status: 400 });
     }
 
-    const db = admin.firestore();
-    // Ruta en la base de datos: users -> uid -> wallets -> symbol
+    const db = getFirestoreInstance();
     const walletRef = db.collection('users').doc(userId).collection('wallets').doc(upperSymbol);
     
     // 1. Comprobar si ya existe en Firestore
@@ -54,7 +68,6 @@ export async function POST(request: Request) {
 
     // 2. Si no existe, generarla con Tatum
     const chain = NATIVE_CHAINS[upperSymbol] || 'ethereum';
-
     const walletRes = await fetch(`https://api.tatum.io/v3/${chain}/wallet`, {
       method: 'GET',
       headers: { 'x-api-key': process.env.TATUM_API_KEY! },
@@ -76,10 +89,10 @@ export async function POST(request: Request) {
     } else if (walletData.address) {
       address = walletData.address;
     } else {
-      throw new Error('Tatum no devolvió dirección');
+      throw new Error('Tatum no devolvió una dirección válida');
     }
 
-    // 3. Guardar en Firestore para que sea permanente
+    // 3. Guardar en Firestore
     await walletRef.set({
       address: address,
       symbol: upperSymbol,
