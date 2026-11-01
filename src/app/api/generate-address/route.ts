@@ -1,9 +1,7 @@
 import { NextResponse } from 'next/server';
 import * as admin from 'firebase-admin';
 
-// ============================================================================
-// CONFIGURACIÓN Y MAPEOS
-// ============================================================================
+// Mapeo de símbolos a redes para Tatum
 const NATIVE_CHAINS: Record<string, string> = {
   BTC: 'bitcoin', LTC: 'litecoin', DOGE: 'dogecoin', BCH: 'bitcoin-cash',
   ADA: 'cardano', XRP: 'ripple', SOL: 'solana', DOT: 'polkadot',
@@ -12,49 +10,34 @@ const NATIVE_CHAINS: Record<string, string> = {
   ALGO: 'algorand', NEAR: 'near', ATOM: 'cosmos', FLOW: 'flow', EOS: 'eos',
 };
 
-// ============================================================================
-// INICIALIZACIÓN DE FIREBASE ADMIN
-// ============================================================================
+// Inicialización robusta de Firebase Admin
 if (!admin.apps.length) {
   try {
     const serviceAccountString = process.env.FIREBASE_SERVICE_ACCOUNT;
-    
-    if (!serviceAccountString) {
-      console.error('❌ FALTA LA VARIABLE FIREBASE_SERVICE_ACCOUNT');
-      throw new Error('Configuración de Firebase incompleta');
-    }
+    if (!serviceAccountString) throw new Error('Falta FIREBASE_SERVICE_ACCOUNT');
 
     const serviceAccount = JSON.parse(serviceAccountString);
-
-    // 🔥 CRÍTICO: Arreglar los saltos de línea de la clave privada (típico error en Vercel)
+    
+    // Limpieza de la clave privada (evita el error de autenticación)
     if (serviceAccount.private_key) {
       serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
     }
 
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
-      projectId: "waevo-wallet" // Forzamos el ID del proyecto
+      projectId: "waevo-wallet"
     });
-    
-    console.log('✅ Firebase Admin inicializado correctamente');
+    console.log('✅ Firebase Admin inicializado');
   } catch (error) {
     console.error('❌ Error inicializando Firebase Admin:', error);
   }
 }
 
-// ============================================================================
-// CONEXIÓN A FIRESTORE
-// ============================================================================
+// ✅ CORRECCIÓN: Usamos admin.firestore() directamente sin settings()
 function getFirestoreInstance() {
-  const db = admin.firestore();
-  // 🔥 CRÍTICO: Forzar el uso de la base de datos por defecto para evitar el error 5 NOT_FOUND
-  db.settings({ databaseId: '(default)' }); 
-  return db;
+  return admin.firestore(); 
 }
 
-// ============================================================================
-// FUNCIONES AUXILIARES
-// ============================================================================
 function getDeterministicIndex(userId: string, symbol: string): number {
   const hash = `${userId}-${symbol}`;
   let index = 0;
@@ -65,94 +48,67 @@ function getDeterministicIndex(userId: string, symbol: string): number {
   return Math.abs(index) % 2147483647;
 }
 
-// ============================================================================
-// CONTROLADOR PRINCIPAL
-// ============================================================================
 export async function POST(request: Request) {
   try {
-    const body = await request.json();
-    const { symbol, userId } = body;
+    const { symbol, userId } = await request.json();
     const upperSymbol = symbol?.toUpperCase();
     
     if (!upperSymbol || !userId) {
-      return NextResponse.json({ error: 'Faltan parámetros: symbol y userId son obligatorios' }, { status: 400 });
+      return NextResponse.json({ error: 'Faltan parámetros' }, { status: 400 });
     }
 
-    console.log(`[Generate-Address] Solicitud para ${upperSymbol} del usuario: ${userId}`);
-
-    // 1. Conectar a Firestore y buscar si ya existe la billetera
     const db = getFirestoreInstance();
     const walletRef = db.collection('users').doc(userId).collection('wallets').doc(upperSymbol);
     
+    // 1. Buscar en Firestore
     const docSnap = await walletRef.get();
     if (docSnap.exists) {
       const data = docSnap.data();
       if (data?.address) {
-        console.log(`[Firestore] Dirección recuperada para ${upperSymbol}: ${data.address}`);
+        console.log(`[Firestore] Dirección recuperada: ${data.address}`);
         return NextResponse.json({ address: data.address });
       }
     }
 
-    console.log(`[Generate-Address] No existe dirección para ${upperSymbol}. Generando con Tatum...`);
-
-    // 2. Si no existe, generarla con Tatum
+    // 2. Generar con Tatum si no existe
     const chain = NATIVE_CHAINS[upperSymbol] || 'ethereum';
-    const apiKey = process.env.TATUM_API_KEY;
-
-    if (!apiKey) {
-      throw new Error('TATUM_API_KEY no está configurada');
-    }
-
-    // Pedir wallet a Tatum
     const walletRes = await fetch(`https://api.tatum.io/v3/${chain}/wallet`, {
       method: 'GET',
-      headers: { 'x-api-key': apiKey },
+      headers: { 'x-api-key': process.env.TATUM_API_KEY! },
     });
 
-    if (!walletRes.ok) {
-      const errText = await walletRes.text();
-      throw new Error(`Tatum error (wallet): ${walletRes.status} - ${errText}`);
-    }
-    
+    if (!walletRes.ok) throw new Error(`Tatum error: ${walletRes.status}`);
     const walletData = await walletRes.json();
-    let address = '';
 
-    // Tatum puede devolver un xpub (para UTXO) o una address directa
+    let address = '';
     if (walletData.xpub) {
       const index = getDeterministicIndex(userId, upperSymbol);
       const addressRes = await fetch(
         `https://api.tatum.io/v3/${chain}/address/${walletData.xpub}/${index}`,
-        { method: 'GET', headers: { 'x-api-key': apiKey } }
+        { method: 'GET', headers: { 'x-api-key': process.env.TATUM_API_KEY! } }
       );
-      
-      if (!addressRes.ok) {
-        const errText = await addressRes.text();
-        throw new Error(`Tatum error (address): ${addressRes.status} - ${errText}`);
-      }
-      
+      if (!addressRes.ok) throw new Error(`Tatum address error: ${addressRes.status}`);
       const addressData = await addressRes.json();
       address = addressData.address;
     } else if (walletData.address) {
       address = walletData.address;
     } else {
-      throw new Error('Tatum no devolvió una dirección válida (ni xpub ni address)');
+      throw new Error('Tatum no devolvió una dirección válida');
     }
 
-    // 3. Guardar la nueva dirección en Firestore
+    // 3. Guardar en Firestore
     await walletRef.set({
       address: address,
       symbol: upperSymbol,
       createdAt: new Date().toISOString()
     });
 
-    console.log(`[Firestore] Nueva dirección guardada para ${upperSymbol}: ${address}`);
+    console.log(`[Firestore] Nueva dirección guardada: ${address}`);
 
     return NextResponse.json({ address });
 
   } catch (error: any) {
-    console.error('🔥 [Error Crítico] en generate-address:', error.message);
-    return NextResponse.json({ 
-      error: error.message || 'Error interno generando la dirección' 
-    }, { status: 500 });
+    console.error('🔥 Error:', error.message);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
