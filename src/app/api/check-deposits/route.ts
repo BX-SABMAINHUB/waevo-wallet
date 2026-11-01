@@ -28,88 +28,70 @@ export async function POST(request: Request) {
     const apiKey = process.env.NOWNODES_API_KEY;
 
     if (!apiKey) {
-      console.error('❌ Falta NOWNODES_API_KEY en las variables de entorno.');
       return NextResponse.json({ error: 'API Key de NOWNodes no configurada' }, { status: 500 });
     }
-
     if (!hostPrefix) {
       return NextResponse.json({ error: `La red ${upperSymbol} no está configurada.` }, { status: 400 });
     }
 
     const baseUrl = `https://${hostPrefix}.nownodes.io/api/v2`;
-
-    // 🔥 CORRECCIÓN CRÍTICA: La API Key va en la cabecera 'api-key', NO en la URL.
     const headers = {
-      'api-key': apiKey, // <-- Así lo exige NOWNodes
+      'api-key': apiKey,
       'Accept': 'application/json',
     };
 
-    // 1. Obtener la altura actual de la blockchain
-    const statusUrl = `${baseUrl}/status`;
-    const statusRes = await fetch(statusUrl, { headers, signal: AbortSignal.timeout(8000) });
-    
-    let currentBlock = 0;
-    if (statusRes.ok) {
-      const statusData = await statusRes.json();
-      currentBlock = statusData.backend?.blocks || statusData.blockbook?.bestHeight || 0;
-    } else {
-      console.warn(`[NOWNodes] No se pudo obtener el estado de la red ${upperSymbol}`);
-    }
-
-    // 2. Obtener el saldo y las transacciones
+    // 1. Obtener la información de la dirección CON transacciones detalladas
     const addressUrl = `${baseUrl}/address/${address}?details=txs&pageSize=50`;
+    console.log(`[NOWNodes] Consultando: ${addressUrl}`);
+    
     const res = await fetch(addressUrl, { headers, signal: AbortSignal.timeout(10000) });
 
     if (!res.ok) {
       if (res.status === 404) {
         return NextResponse.json({ deposits: [], balance: '0' });
       }
-      // Si vuelve a dar 401, el mensaje de error te lo dirá claramente
-      if (res.status === 401) {
-        throw new Error('La API Key de NOWNodes es inválida o ha sido rechazada. Revisa tu clave en Vercel.');
-      }
+      const errorText = await res.text();
+      console.error(`[NOWNodes] Error ${res.status}:`, errorText);
       throw new Error(`NOWNodes respondió con estado ${res.status}`);
     }
 
     const data = await res.json();
+    
+    // 🔥 LOG CRÍTICO: Imprimimos la respuesta completa para depuración
+    console.log('[NOWNodes] Respuesta completa de la API:', JSON.stringify(data, null, 2));
 
-    // 3. Calcular saldo
+    // 2. Calcular saldo
     const isEvm = ['ETH', 'MATIC', 'BNB'].includes(upperSymbol);
     const decimals = isEvm ? 18 : 8; 
     const balanceRaw = data.balance || '0';
     const balance = (parseFloat(balanceRaw) / Math.pow(10, decimals)).toFixed(8);
 
-    // 4. Procesar transacciones
+    // 3. Procesar transacciones
     const transactions = data.transactions || [];
     const deposits = [];
 
+    console.log(`[NOWNodes] Transacciones encontradas en la respuesta: ${transactions.length}`);
+
     for (const tx of transactions) {
-      let isIncoming = false;
       let receivedValue = 0;
 
-      // UTXO (Litecoin, Bitcoin...)
+      // 🔥 CORRECCIÓN: Usamos el array 'vout' para TODAS las redes (UTXO y EVM)
       if (tx.vout) {
-        tx.vout.forEach((out: any) => {
-          if (out.addresses?.includes(address)) {
-            isIncoming = true;
+        for (const out of tx.vout) {
+          // Comprobamos si nuestra dirección está en la lista de direcciones del output
+          if (out.addresses && out.addresses.includes(address)) {
             receivedValue += parseFloat(out.value || '0');
           }
-        });
-      } 
-      // EVM (Ethereum, Polygon...)
-      else if (tx.to?.toLowerCase() === address.toLowerCase()) {
-        isIncoming = true;
-        receivedValue = parseFloat(tx.value || '0');
+        }
       }
 
-      if (!isIncoming || receivedValue <= 0) continue;
-
-      const blockHeight = tx.blockHeight || tx.blockNumber || 0;
-      let confirmations = 0;
-      if (blockHeight > 0 && currentBlock > 0) {
-        confirmations = currentBlock - blockHeight + 1;
+      // Si no se recibió nada en esta dirección, ignoramos la transacción
+      if (receivedValue <= 0) {
+        continue;
       }
 
+      // 🔥 CORRECCIÓN: Usamos el campo 'confirmations' directamente de la respuesta
+      const confirmations = tx.confirmations || 0;
       const status = confirmations >= 1 ? 'confirmed' : 'pending';
       const amount = (receivedValue / Math.pow(10, decimals)).toFixed(8);
 
@@ -123,9 +105,10 @@ export async function POST(request: Request) {
       });
     }
 
+    // Ordenar por fecha descendente (más reciente primero)
     deposits.sort((a, b) => b.timestamp - a.timestamp);
 
-    console.log(`[NOWNodes] Éxito en ${upperSymbol}. Depósitos: ${deposits.length}. Saldo: ${balance}`);
+    console.log(`[NOWNodes] Depósitos procesados para ${upperSymbol}:`, deposits);
 
     return NextResponse.json({ deposits, balance });
 
