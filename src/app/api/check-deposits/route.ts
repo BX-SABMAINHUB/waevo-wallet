@@ -1,8 +1,5 @@
 import { NextResponse } from 'next/server';
 
-// ============================================================================
-// CONFIGURACIÓN DE NOWNODES
-// ============================================================================
 const NOWNODES_HOSTS: Record<string, string> = {
   BTC: 'btcbook',
   LTC: 'ltcbook',
@@ -35,52 +32,46 @@ export async function POST(request: Request) {
     }
 
     const baseUrl = `https://${hostPrefix}.nownodes.io/api/v2`;
+    
+    // 🔥 LA CLAVE VA ÚNICAMENTE EN LA CABECERA 'api-key'
+    const headers = {
+      'api-key': apiKey,
+      'Accept': 'application/json',
+    };
 
-    // 🔥 AHORA LA API KEY VA EN LA URL Y EN LA CABECERA
-    const addressUrl = `${baseUrl}/address/${address}?details=txs&pageSize=50&api_key=${apiKey}`;
+    const addressUrl = `${baseUrl}/address/${address}?details=txs&pageSize=50`;
     console.log(`[NOWNodes] Consultando: ${addressUrl}`);
     
-    const res = await fetch(addressUrl, { 
-      headers: { 
-        'api-key': apiKey, 
-        'Accept': 'application/json' 
-      }, 
-      signal: AbortSignal.timeout(10000) 
-    });
+    const res = await fetch(addressUrl, { headers, signal: AbortSignal.timeout(10000) });
 
     if (!res.ok) {
       if (res.status === 404) {
         return NextResponse.json({ deposits: [], balance: '0' });
       }
-      const errorText = await res.text();
-      console.error(`[NOWNodes] Error ${res.status}:`, errorText);
+      if (res.status === 401) {
+        // Error específico de autenticación
+        throw new Error('La API Key de NOWNodes es inválida o ha sido rechazada. Revisa tu clave en el dashboard de NOWNodes.');
+      }
       throw new Error(`NOWNodes respondió con estado ${res.status}`);
     }
 
     const data = await res.json();
     
-    // Verificamos que la respuesta tenga la estructura esperada
     if (!data || typeof data.balance === 'undefined') {
-      console.error('[NOWNodes] Respuesta inesperada:', data);
       return NextResponse.json({ deposits: [], balance: '0', message: 'Dirección sin actividad o respuesta vacía' });
     }
 
-    // 2. Calcular saldo
     const isEvm = ['ETH', 'MATIC', 'BNB'].includes(upperSymbol);
     const decimals = isEvm ? 18 : 8; 
     const balanceRaw = data.balance || '0';
     const balance = (parseFloat(balanceRaw) / Math.pow(10, decimals)).toFixed(8);
 
-    // 3. Procesar transacciones
     const transactions = data.transactions || [];
     const deposits = [];
-
-    console.log(`[NOWNodes] Transacciones encontradas: ${transactions.length}`);
 
     for (const tx of transactions) {
       let receivedValue = 0;
 
-      // Usamos 'vout' para todas las redes (BlockBook lo estandariza)
       if (tx.vout) {
         for (const out of tx.vout) {
           if (out.addresses && out.addresses.includes(address)) {
@@ -105,9 +96,7 @@ export async function POST(request: Request) {
       });
     }
 
-    // Ordenar por fecha descendente
     deposits.sort((a, b) => b.timestamp - a.timestamp);
-
     return NextResponse.json({ deposits, balance });
 
   } catch (error: any) {
