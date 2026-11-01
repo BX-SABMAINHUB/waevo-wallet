@@ -3,20 +3,16 @@ import { NextResponse } from 'next/server';
 // ============================================================================
 // CONFIGURACIÓN DE NOWNODES
 // ============================================================================
-// Mapeo de símbolos a sus hosts de BlockBook en NOWNodes
 const NOWNODES_HOSTS: Record<string, string> = {
-  // Redes UTXO
   BTC: 'btcbook',
   LTC: 'ltcbook',
   DOGE: 'dogebook',
   BCH: 'bchbook',
   DASH: 'dashbook',
   ZEC: 'zecbook',
-  // Redes EVM
   ETH: 'eth-blockbook',
   MATIC: 'polygon-blockbook',
   BNB: 'bsc-blockbook',
-  // Puedes añadir más redes según el catálogo de NOWNodes
 };
 
 export async function POST(request: Request) {
@@ -37,47 +33,53 @@ export async function POST(request: Request) {
     }
 
     if (!hostPrefix) {
-      return NextResponse.json({ 
-        error: `La red ${upperSymbol} no está configurada en NOWNodes.` 
-      }, { status: 400 });
+      return NextResponse.json({ error: `La red ${upperSymbol} no está configurada.` }, { status: 400 });
     }
 
     const baseUrl = `https://${hostPrefix}.nownodes.io/api/v2`;
 
-    // 1. Obtener la altura actual de la blockchain para calcular confirmaciones
-    const statusUrl = `${baseUrl}/status?api_key=${apiKey}`;
-    const statusRes = await fetch(statusUrl, { signal: AbortSignal.timeout(8000) });
+    // 🔥 CORRECCIÓN CRÍTICA: La API Key va en la cabecera 'api-key', NO en la URL.
+    const headers = {
+      'api-key': apiKey, // <-- Así lo exige NOWNodes
+      'Accept': 'application/json',
+    };
+
+    // 1. Obtener la altura actual de la blockchain
+    const statusUrl = `${baseUrl}/status`;
+    const statusRes = await fetch(statusUrl, { headers, signal: AbortSignal.timeout(8000) });
     
     let currentBlock = 0;
     if (statusRes.ok) {
       const statusData = await statusRes.json();
-      // BlockBook devuelve la altura en backend.blocks
       currentBlock = statusData.backend?.blocks || statusData.blockbook?.bestHeight || 0;
     } else {
       console.warn(`[NOWNodes] No se pudo obtener el estado de la red ${upperSymbol}`);
     }
 
-    // 2. Obtener el saldo y las transacciones de la dirección
-    const addressUrl = `${baseUrl}/address/${address}?details=txs&pageSize=50&api_key=${apiKey}`;
-    const res = await fetch(addressUrl, { signal: AbortSignal.timeout(10000) });
+    // 2. Obtener el saldo y las transacciones
+    const addressUrl = `${baseUrl}/address/${address}?details=txs&pageSize=50`;
+    const res = await fetch(addressUrl, { headers, signal: AbortSignal.timeout(10000) });
 
     if (!res.ok) {
       if (res.status === 404) {
-        // La dirección no tiene actividad
         return NextResponse.json({ deposits: [], balance: '0' });
+      }
+      // Si vuelve a dar 401, el mensaje de error te lo dirá claramente
+      if (res.status === 401) {
+        throw new Error('La API Key de NOWNodes es inválida o ha sido rechazada. Revisa tu clave en Vercel.');
       }
       throw new Error(`NOWNodes respondió con estado ${res.status}`);
     }
 
     const data = await res.json();
 
-    // 3. Calcular el saldo (BlockBook lo devuelve en la unidad mínima)
+    // 3. Calcular saldo
     const isEvm = ['ETH', 'MATIC', 'BNB'].includes(upperSymbol);
     const decimals = isEvm ? 18 : 8; 
     const balanceRaw = data.balance || '0';
     const balance = (parseFloat(balanceRaw) / Math.pow(10, decimals)).toFixed(8);
 
-    // 4. Procesar las transacciones para encontrar los ingresos
+    // 4. Procesar transacciones
     const transactions = data.transactions || [];
     const deposits = [];
 
@@ -85,7 +87,7 @@ export async function POST(request: Request) {
       let isIncoming = false;
       let receivedValue = 0;
 
-      // Lógica para UTXO (Bitcoin, Litecoin, etc.)
+      // UTXO (Litecoin, Bitcoin...)
       if (tx.vout) {
         tx.vout.forEach((out: any) => {
           if (out.addresses?.includes(address)) {
@@ -94,24 +96,20 @@ export async function POST(request: Request) {
           }
         });
       } 
-      // Lógica para EVM (Ethereum, Polygon, etc.)
+      // EVM (Ethereum, Polygon...)
       else if (tx.to?.toLowerCase() === address.toLowerCase()) {
         isIncoming = true;
         receivedValue = parseFloat(tx.value || '0');
       }
 
-      // Solo procesamos ingresos con valor positivo
       if (!isIncoming || receivedValue <= 0) continue;
 
-      // Calcular confirmaciones
       const blockHeight = tx.blockHeight || tx.blockNumber || 0;
       let confirmations = 0;
-      
       if (blockHeight > 0 && currentBlock > 0) {
         confirmations = currentBlock - blockHeight + 1;
       }
 
-      // Consideramos confirmado si tiene al menos 1 confirmación (o el número que quieras exigir)
       const status = confirmations >= 1 ? 'confirmed' : 'pending';
       const amount = (receivedValue / Math.pow(10, decimals)).toFixed(8);
 
@@ -125,7 +123,6 @@ export async function POST(request: Request) {
       });
     }
 
-    // Ordenar por fecha descendente (más reciente primero)
     deposits.sort((a, b) => b.timestamp - a.timestamp);
 
     console.log(`[NOWNodes] Éxito en ${upperSymbol}. Depósitos: ${deposits.length}. Saldo: ${balance}`);
@@ -134,6 +131,6 @@ export async function POST(request: Request) {
 
   } catch (error: any) {
     console.error('🔥 [Error en check-deposits - NOWNodes]:', error.message);
-    return NextResponse.json({ error: error.message || 'Error consultando NOWNodes' }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
