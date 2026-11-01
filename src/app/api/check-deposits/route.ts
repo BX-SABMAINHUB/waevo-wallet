@@ -35,16 +35,18 @@ export async function POST(request: Request) {
     }
 
     const baseUrl = `https://${hostPrefix}.nownodes.io/api/v2`;
-    const headers = {
-      'api-key': apiKey,
-      'Accept': 'application/json',
-    };
 
-    // 1. Obtener la información de la dirección CON transacciones detalladas
-    const addressUrl = `${baseUrl}/address/${address}?details=txs&pageSize=50`;
+    // 🔥 AHORA LA API KEY VA EN LA URL Y EN LA CABECERA
+    const addressUrl = `${baseUrl}/address/${address}?details=txs&pageSize=50&api_key=${apiKey}`;
     console.log(`[NOWNodes] Consultando: ${addressUrl}`);
     
-    const res = await fetch(addressUrl, { headers, signal: AbortSignal.timeout(10000) });
+    const res = await fetch(addressUrl, { 
+      headers: { 
+        'api-key': apiKey, 
+        'Accept': 'application/json' 
+      }, 
+      signal: AbortSignal.timeout(10000) 
+    });
 
     if (!res.ok) {
       if (res.status === 404) {
@@ -57,8 +59,11 @@ export async function POST(request: Request) {
 
     const data = await res.json();
     
-    // 🔥 LOG CRÍTICO: Imprimimos la respuesta completa para depuración
-    console.log('[NOWNodes] Respuesta completa de la API:', JSON.stringify(data, null, 2));
+    // Verificamos que la respuesta tenga la estructura esperada
+    if (!data || typeof data.balance === 'undefined') {
+      console.error('[NOWNodes] Respuesta inesperada:', data);
+      return NextResponse.json({ deposits: [], balance: '0', message: 'Dirección sin actividad o respuesta vacía' });
+    }
 
     // 2. Calcular saldo
     const isEvm = ['ETH', 'MATIC', 'BNB'].includes(upperSymbol);
@@ -70,27 +75,22 @@ export async function POST(request: Request) {
     const transactions = data.transactions || [];
     const deposits = [];
 
-    console.log(`[NOWNodes] Transacciones encontradas en la respuesta: ${transactions.length}`);
+    console.log(`[NOWNodes] Transacciones encontradas: ${transactions.length}`);
 
     for (const tx of transactions) {
       let receivedValue = 0;
 
-      // 🔥 CORRECCIÓN: Usamos el array 'vout' para TODAS las redes (UTXO y EVM)
+      // Usamos 'vout' para todas las redes (BlockBook lo estandariza)
       if (tx.vout) {
         for (const out of tx.vout) {
-          // Comprobamos si nuestra dirección está en la lista de direcciones del output
           if (out.addresses && out.addresses.includes(address)) {
             receivedValue += parseFloat(out.value || '0');
           }
         }
       }
 
-      // Si no se recibió nada en esta dirección, ignoramos la transacción
-      if (receivedValue <= 0) {
-        continue;
-      }
+      if (receivedValue <= 0) continue;
 
-      // 🔥 CORRECCIÓN: Usamos el campo 'confirmations' directamente de la respuesta
       const confirmations = tx.confirmations || 0;
       const status = confirmations >= 1 ? 'confirmed' : 'pending';
       const amount = (receivedValue / Math.pow(10, decimals)).toFixed(8);
@@ -105,10 +105,8 @@ export async function POST(request: Request) {
       });
     }
 
-    // Ordenar por fecha descendente (más reciente primero)
+    // Ordenar por fecha descendente
     deposits.sort((a, b) => b.timestamp - a.timestamp);
-
-    console.log(`[NOWNodes] Depósitos procesados para ${upperSymbol}:`, deposits);
 
     return NextResponse.json({ deposits, balance });
 
