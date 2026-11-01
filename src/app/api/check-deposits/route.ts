@@ -1,15 +1,21 @@
 import { NextResponse } from 'next/server';
 
-const NOWNODES_HOSTS: Record<string, string> = {
-  BTC: 'btcbook',
-  LTC: 'ltcbook',
-  DOGE: 'dogebook',
-  BCH: 'bchbook',
-  DASH: 'dashbook',
-  ZEC: 'zecbook',
-  ETH: 'eth-blockbook',
-  MATIC: 'polygon-blockbook',
-  BNB: 'bsc-blockbook',
+// ============================================================================
+// CONFIGURACIÓN DE GETBLOCK
+// ============================================================================
+// Mapeo de símbolos a los slugs de red de GetBlock
+const GETBLOCK_CHAIN_MAP: Record<string, string> = {
+  // Redes UTXO
+  BTC: 'btc',
+  LTC: 'ltc',
+  DOGE: 'doge',
+  BCH: 'bch',
+  DASH: 'dash',
+  ZEC: 'zec',
+  // Redes EVM (la lógica de consulta sería similar)
+  ETH: 'eth',
+  MATIC: 'polygon',
+  BNB: 'bsc',
 };
 
 export async function POST(request: Request) {
@@ -21,86 +27,125 @@ export async function POST(request: Request) {
     }
 
     const upperSymbol = symbol.toUpperCase();
-    const hostPrefix = NOWNODES_HOSTS[upperSymbol];
-    const apiKey = process.env.NOWNODES_API_KEY;
+    const chainSlug = GETBLOCK_CHAIN_MAP[upperSymbol];
+    const apiKey = process.env.GETBLOCK_API_KEY;
 
     if (!apiKey) {
-      return NextResponse.json({ error: 'API Key de NOWNodes no configurada' }, { status: 500 });
+      return NextResponse.json({ error: 'API Key de GetBlock no configurada' }, { status: 500 });
     }
-    if (!hostPrefix) {
+    if (!chainSlug) {
       return NextResponse.json({ error: `La red ${upperSymbol} no está configurada.` }, { status: 400 });
     }
 
-    const baseUrl = `https://${hostPrefix}.nownodes.io/api/v2`;
-    
-    // 🔥 LA CLAVE VA ÚNICAMENTE EN LA CABECERA 'api-key'
+    // GetBlock usa una URL base unificada con el slug de la red
+    const rpcUrl = `https://${chainSlug}.getblock.io/mainnet/`;
     const headers = {
-      'api-key': apiKey,
-      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
     };
 
-    const addressUrl = `${baseUrl}/address/${address}?details=txs&pageSize=50`;
-    console.log(`[NOWNodes] Consultando: ${addressUrl}`);
-    
-    const res = await fetch(addressUrl, { headers, signal: AbortSignal.timeout(10000) });
+    // 1. Obtener el saldo de la dirección (para UTXO)
+    const balancePayload = {
+      jsonrpc: '2.0',
+      method: 'getaddressbalance', // Método estándar para UTXO
+      params: [{ addresses: [address] }],
+      id: 1,
+    };
 
-    if (!res.ok) {
-      if (res.status === 404) {
-        return NextResponse.json({ deposits: [], balance: '0' });
-      }
-      if (res.status === 401) {
-        // Error específico de autenticación
-        throw new Error('La API Key de NOWNodes es inválida o ha sido rechazada. Revisa tu clave en el dashboard de NOWNodes.');
-      }
-      throw new Error(`NOWNodes respondió con estado ${res.status}`);
+    const balanceRes = await fetch(rpcUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(balancePayload),
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!balanceRes.ok) {
+        const errText = await balanceRes.text();
+        console.error(`[GetBlock] Error en balance: ${balanceRes.status} - ${errText}`);
+        throw new Error(`GetBlock respondió con estado ${balanceRes.status}`);
     }
 
-    const data = await res.json();
-    
-    if (!data || typeof data.balance === 'undefined') {
-      return NextResponse.json({ deposits: [], balance: '0', message: 'Dirección sin actividad o respuesta vacía' });
+    const balanceData = await balanceRes.json();
+    const rawBalance = balanceData.result?.balance || 0;
+    const decimals = 8; // UTXO usa 8 decimales
+    const balance = (rawBalance / Math.pow(10, decimals)).toFixed(8);
+
+    // 2. Obtener las transacciones recientes
+    const txPayload = {
+      jsonrpc: '2.0',
+      method: 'getaddresstxids', // Método para obtener hashes de transacciones
+      params: [{ addresses: [address], limit: 50 }],
+      id: 2,
+    };
+
+    const txRes = await fetch(rpcUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(txPayload),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!txRes.ok) {
+        throw new Error(`GetBlock respondió con estado ${txRes.status} en transacciones`);
     }
 
-    const isEvm = ['ETH', 'MATIC', 'BNB'].includes(upperSymbol);
-    const decimals = isEvm ? 18 : 8; 
-    const balanceRaw = data.balance || '0';
-    const balance = (parseFloat(balanceRaw) / Math.pow(10, decimals)).toFixed(8);
-
-    const transactions = data.transactions || [];
+    const txData = await txRes.json();
+    const txids = txData.result || [];
     const deposits = [];
 
-    for (const tx of transactions) {
-      let receivedValue = 0;
+    // 3. Para cada transacción, obtener los detalles y filtrar los ingresos
+    for (const txid of txids) {
+      const detailPayload = {
+        jsonrpc: '2.0',
+        method: 'getrawtransaction',
+        params: [txid, 1], // 1 = verbose (devuelve JSON)
+        id: 3,
+      };
 
+      const detailRes = await fetch(rpcUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(detailPayload),
+      });
+      
+      if (!detailRes.ok) continue;
+      
+      const detailData = await detailRes.json();
+      const tx = detailData.result;
+      if (!tx) continue;
+
+      // Buscar si nuestra dirección está en los outputs (ingreso)
+      let receivedValue = 0;
       if (tx.vout) {
         for (const out of tx.vout) {
-          if (out.addresses && out.addresses.includes(address)) {
-            receivedValue += parseFloat(out.value || '0');
+          if (out.scriptPubKey?.addresses?.includes(address)) {
+            receivedValue += out.value; // El valor ya viene en la unidad principal
           }
         }
       }
 
-      if (receivedValue <= 0) continue;
-
-      const confirmations = tx.confirmations || 0;
-      const status = confirmations >= 1 ? 'confirmed' : 'pending';
-      const amount = (receivedValue / Math.pow(10, decimals)).toFixed(8);
-
-      deposits.push({
-        symbol: upperSymbol,
-        amount: amount,
-        hash: tx.txid || tx.hash,
-        status,
-        confirmations,
-        timestamp: tx.blockTime ? tx.blockTime * 1000 : Date.now(),
-      });
+      if (receivedValue > 0) {
+        const confirmations = tx.confirmations || 0;
+        const status = confirmations >= 1 ? 'confirmed' : 'pending';
+        
+        deposits.push({
+          symbol: upperSymbol,
+          amount: receivedValue.toFixed(8),
+          hash: txid,
+          status,
+          confirmations,
+          timestamp: tx.time ? tx.time * 1000 : Date.now(),
+        });
+      }
     }
 
+    // Ordenar por fecha descendente
     deposits.sort((a, b) => b.timestamp - a.timestamp);
+
     return NextResponse.json({ deposits, balance });
 
   } catch (error: any) {
-    console.error('🔥 [Error en check-deposits - NOWNodes]:', error.message);
+    console.error('🔥 [Error en check-deposits - GetBlock]:', error.message);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
