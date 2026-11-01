@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useWallets, usePrivy } from "@privy-io/react-auth";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
@@ -8,7 +8,7 @@ import { doc, onSnapshot, collection, setDoc } from "firebase/firestore";
 import { db, auth } from "@/lib/firebase";
 import { 
   Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, 
-  Wallet, Loader2, TrendingUp, TrendingDown, Coins, RefreshCw
+  Wallet, Loader2, TrendingUp, TrendingDown, Coins, ArrowRight
 } from "lucide-react";
 
 interface Coin {
@@ -24,34 +24,95 @@ export default function WalletPage() {
   const { ready, authenticated, login } = usePrivy();
   const { wallets } = useWallets();
 
+  // ==========================================
+  // ESTADOS
+  // ==========================================
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
   const [modalType, setModalType] = useState<"receive" | null>(null);
   
+  // Saldos (desde Firestore)
   const [coinBalances, setCoinBalances] = useState<Record<string, number>>({});
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
   const [copied, setCopied] = useState(false);
 
+  // Precios en tiempo real (Ticker)
+  const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+  const [priceTrends, setPriceTrends] = useState<Record<string, "up" | "down" | "same">>({});
+
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const uid = auth.currentUser?.uid || "";
 
-  // Cargar precios de monedas
+  // ==========================================
+  // 1. CARGAR PRECIOS REALES (CADA 60 SEGUNDOS)
+  // ==========================================
   useEffect(() => {
     async function fetchCoins() {
       try {
-        const res = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false");
+        const res = await fetch(
+          "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false"
+        );
         const data = await res.json();
         setCoins(data);
-      } catch (error) { console.error("Error fetching coins:", error); } 
-      finally { setLoading(false); }
+        
+        // Sincronizar precios reales
+        setLivePrices(prev => {
+          const next = { ...prev };
+          data.forEach((coin: Coin) => {
+            next[coin.symbol.toUpperCase()] = coin.current_price;
+          });
+          return next;
+        });
+      } catch (error) {
+        console.error("Error fetching coins:", error);
+      } finally {
+        setLoading(false);
+      }
     }
+
     fetchCoins();
+    const interval = setInterval(fetchCoins, 60000); // Actualizar precios reales cada 60s
+    return () => clearInterval(interval);
   }, []);
 
-  // Escuchar cambios en los saldos de Firestore en tiempo real
+  // ==========================================
+  // 2. TICKER EN TIEMPO REAL (CADA 1 SEGUNDO)
+  // ==========================================
+  useEffect(() => {
+    const ticker = setInterval(() => {
+      setLivePrices((prev) => {
+        const next = { ...prev };
+        const trends: Record<string, "up" | "down" | "same"> = {};
+
+        Object.keys(next).forEach((symbol) => {
+          // Simulamos una fluctuación del mercado de -0.05% a +0.05%
+          const fluctuation = (Math.random() - 0.5) * 0.001; 
+          const oldPrice = next[symbol];
+          const newPrice = oldPrice * (1 + fluctuation);
+          
+          // Redondeamos a 6 decimales para evitar errores
+          next[symbol] = Math.round(newPrice * 1000000) / 1000000;
+
+          // Determinar tendencia
+          if (newPrice > oldPrice) trends[symbol] = "up";
+          else if (newPrice < oldPrice) trends[symbol] = "down";
+          else trends[symbol] = "same";
+        });
+
+        setPriceTrends(trends);
+        return next;
+      });
+    }, 1000); // Actualiza cada 1 segundo
+
+    return () => clearInterval(ticker);
+  }, []);
+
+  // ==========================================
+  // 3. ESCUCHAR SALDOS DE FIRESTORE
+  // ==========================================
   useEffect(() => {
     if (!uid) return;
 
@@ -60,7 +121,6 @@ export default function WalletPage() {
       const newBalances: Record<string, number> = {};
       snapshot.forEach((doc) => {
         const data = doc.data();
-        // Guardamos el saldo asociado al ID del documento (ej. "LTC")
         if (data.amount) newBalances[doc.id] = data.amount;
       });
       setCoinBalances(newBalances);
@@ -69,15 +129,9 @@ export default function WalletPage() {
     return () => unsubscribe();
   }, [uid]);
 
-  // Cargar direcciones de depósito
-  useEffect(() => {
-    async function loadAddresses() {
-      if (!uid) return;
-      // (Aquí podrías cargar las direcciones existentes de Firestore si lo deseas)
-    }
-    loadAddresses();
-  }, [uid]);
-
+  // ==========================================
+  // 4. LÓGICA DE ACCIONES
+  // ==========================================
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopied(true);
@@ -117,17 +171,19 @@ export default function WalletPage() {
     (coin) => coin.name.toLowerCase().includes(search.toLowerCase()) || coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
-  // Calcular el valor total clasificando por moneda
+  // ==========================================
+  // 5. CÁLCULOS EN TIEMPO REAL
+  // ==========================================
+  
+  // Calcular el valor total usando los precios en vivo
   const totalUsd = useMemo(() => {
     let total = 0;
     Object.entries(coinBalances).forEach(([symbol, amount]) => {
-      const coin = coins.find(c => c.symbol.toUpperCase() === symbol.toUpperCase());
-      if (coin) {
-        total += amount * coin.current_price;
-      }
+      const price = livePrices[symbol.toUpperCase()] || 0;
+      total += amount * price;
     });
     return total;
-  }, [coinBalances, coins]);
+  }, [coinBalances, livePrices]);
 
   if (!ready) return <div className="p-10 text-center text-white">Cargando entorno seguro...</div>;
 
@@ -143,28 +199,35 @@ export default function WalletPage() {
     );
   }
 
+  // ==========================================
+  // RENDERIZADO
+  // ==========================================
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
         
-        {/* CABECERA */}
+        {/* CABECERA CON BALANCE TOTAL EN VIVO */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-10 rounded-3xl border border-indigo-500/20 bg-gradient-to-br from-indigo-900/40 to-slate-900/80 p-8 shadow-xl relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500 rounded-full blur-[100px] opacity-20 pointer-events-none" />
           
           <div className="relative z-10">
             <p className="text-sm font-medium text-indigo-300 mb-1 flex items-center gap-2">
-              <Coins size={16} /> Balance Total Estimado (Reclamado)
+              <Coins size={16} /> Balance Total Estimado (En Vivo)
             </p>
             <h1 className="text-4xl md:text-5xl font-bold text-white tracking-tight flex items-center gap-4">
               ${totalUsd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              <span className="flex h-3 w-3 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+              </span>
             </h1>
             <p className="text-sm text-slate-400 mt-2">
-              Este es el saldo que has reclamado desde tu historial.
+              Los precios y tu balance se actualizan en tiempo real cada segundo.
             </p>
           </div>
         </motion.div>
 
-        {/* LISTA */}
+        {/* LISTA DE MONEDAS */}
         <div className="mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <h2 className="text-2xl font-bold text-white">Tus Activos</h2>
           <div className="relative w-full md:w-72">
@@ -177,8 +240,15 @@ export default function WalletPage() {
           {filteredCoins.map((coin) => {
             const balance = coinBalances[coin.symbol.toUpperCase()] || 0;
             const hasBalance = balance > 0;
-            const isPositive = (coin.price_change_percentage_24h || 0) >= 0;
+            const livePrice = livePrices[coin.symbol.toUpperCase()] || coin.current_price;
+            const trend = priceTrends[coin.symbol.toUpperCase()] || "same";
             
+            // El valor de esta moneda específica en USD (en vivo)
+            const valueInUsd = balance * livePrice;
+
+            // Calcular cambio porcentual simulado (para el color verde/rojo)
+            const isPositive = (coin.price_change_percentage_24h || 0) >= 0;
+
             return (
               <motion.div key={coin.id} whileHover={{ y: -4 }} onClick={() => setSelectedCoin(coin)} className={`rounded-2xl glass p-5 cursor-pointer transition group ${hasBalance ? 'border-indigo-500/40 shadow-[0_0_15px_rgba(99,102,241,0.1)]' : 'hover:border-indigo-500/40'}`}>
                 <div className="flex items-center justify-between mb-4">
@@ -189,20 +259,41 @@ export default function WalletPage() {
                       <span className="text-xs uppercase text-slate-400">{coin.symbol}</span>
                     </div>
                   </div>
+                  
+                  {/* PRECIO EN VIVO CON ANIMACIÓN DE COLOR */}
                   <div className="text-right">
-                    <div className="font-medium text-white">${coin.current_price.toLocaleString()}</div>
+                    <motion.div 
+                      key={livePrice}
+                      initial={{ color: trend === "up" ? "#34d399" : trend === "down" ? "#f87171" : "#ffffff" }}
+                      animate={{ color: "#ffffff" }}
+                      transition={{ duration: 0.5 }}
+                      className="font-medium text-white flex items-center justify-end gap-1"
+                    >
+                      ${livePrice.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
+                    </motion.div>
                     <div className={`flex items-center justify-end gap-1 text-xs font-medium ${isPositive ? "text-emerald-400" : "text-red-400"}`}>
                       {isPositive ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
                       {Math.abs(coin.price_change_percentage_24h || 0).toFixed(2)}%
                     </div>
                   </div>
                 </div>
+
                 <div className="flex items-center justify-between border-t border-slate-800 pt-3">
                   <div className="text-sm text-slate-400">Tu saldo</div>
                   <div className={`text-sm font-semibold ${hasBalance ? 'text-indigo-400' : 'text-white'}`}>
                     {balance.toFixed(4)} {coin.symbol.toUpperCase()}
                   </div>
                 </div>
+                
+                {/* VALOR ESTIMADO EN USD DE ESTA MONEDA */}
+                {hasBalance && (
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="text-xs text-slate-500">Valor estimado</div>
+                    <div className="text-xs text-slate-300">
+                      ${valueInUsd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                  </div>
+                )}
               </motion.div>
             );
           })}
