@@ -3,25 +3,23 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { motion, AnimatePresence } from "@/components/motion-client";
-import { auth } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
+import { doc, getDoc, setDoc, increment } from "firebase/firestore";
 import { 
   RefreshCw, CheckCircle2, Clock, Wallet, Loader2, 
   AlertCircle, Search, ChevronDown, ExternalLink, 
-  ArrowDownLeft, ShieldCheck, Zap, Activity, Copy, X, TrendingUp,
-  Database, Server, Hash, ArrowRight
+  ArrowDownLeft, ShieldCheck, Activity, Copy, X, TrendingUp,
+  Database, Server, Hash, Gift
 } from "lucide-react";
 
 interface Coin { id: string; symbol: string; name: string; image: string; }
 interface Deposit { symbol: string; amount: string; hash: string; status: 'pending' | 'confirmed'; confirmations: number; timestamp: number; }
 
-// Configuración de tiempos por red
 const NETWORK_CONFIG: Record<string, { requiredConf: number, blockTimeMins: number }> = {
   BTC: { requiredConf: 3, blockTimeMins: 10 },
   LTC: { requiredConf: 3, blockTimeMins: 2.5 },
   DOGE: { requiredConf: 6, blockTimeMins: 1 },
-  BCH: { requiredConf: 3, blockTimeMins: 10 },
   ETH: { requiredConf: 12, blockTimeMins: 0.2 },
-  MATIC: { requiredConf: 128, blockTimeMins: 0.03 },
   DEFAULT: { requiredConf: 3, blockTimeMins: 5 }
 };
 
@@ -36,19 +34,20 @@ export default function HistoryPage() {
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const [deposits, setDeposits] = useState<Deposit[]>([]);
-  const [balance, setBalance] = useState<string>('0');
   const [checking, setChecking] = useState(false);
   const [checked, setChecked] = useState(false);
   
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
 
-  // Estados del Modal
   const [selectedTx, setSelectedTx] = useState<Deposit | null>(null);
   const [isTxModalOpen, setIsTxModalOpen] = useState(false);
   const [copiedHash, setCopiedHash] = useState(false);
 
-  // Cargar monedas
+  // Estados para Reclamar
+  const [claimedTxs, setClaimedTxs] = useState<string[]>([]);
+  const [isClaiming, setIsClaiming] = useState(false);
+
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -60,7 +59,23 @@ export default function HistoryPage() {
     fetchCoins();
   }, []);
 
-  // Cerrar dropdown
+  // Cargar transacciones ya reclamadas
+  useEffect(() => {
+    if (!uid) return;
+    async function fetchClaimed() {
+      try {
+        const docRef = doc(db, "users", uid, "claimed_transactions", "history");
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          setClaimedTxs(docSnap.data().hashes || []);
+        }
+      } catch (error) {
+        console.error("Error cargando reclamados:", error);
+      }
+    }
+    fetchClaimed();
+  }, [uid]);
+
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) setIsDropdownOpen(false);
@@ -69,7 +84,6 @@ export default function HistoryPage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Función para obtener los depósitos
   const fetchDeposits = useCallback(async () => {
     if (!selectedCoin || !depositAddresses[selectedCoin.id]) return;
     setChecking(true);
@@ -83,22 +97,15 @@ export default function HistoryPage() {
       if (!res.ok) throw new Error(data.error || 'Error consultando depósitos');
       
       setDeposits(data.deposits || []);
-      setBalance(data.balance || '0');
       
-      // Actualizar la transacción seleccionada si el modal está abierto
       if (selectedTx && data.deposits) {
         const updatedTx = data.deposits.find((d: Deposit) => d.hash === selectedTx.hash);
         if (updatedTx) setSelectedTx(updatedTx);
       }
-    } catch (err) { 
-      console.error('Error verificando:', err); 
-    } finally { 
-      setChecking(false); 
-      setChecked(true); 
-    }
+    } catch (err) { console.error('Error verificando:', err); }
+    finally { setChecking(false); setChecked(true); }
   }, [selectedCoin, depositAddresses, selectedTx]);
 
-  // Polling automático (cada 10 segundos) si el modal está abierto y pendiente
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isTxModalOpen && selectedTx && selectedTx.status === 'pending') {
@@ -113,7 +120,6 @@ export default function HistoryPage() {
     setSearch("");
     setDeposits([]);
     setChecked(false);
-    setBalance('0');
     
     if (depositAddresses[coin.id] || !uid) return;
     
@@ -136,7 +142,35 @@ export default function HistoryPage() {
     setTimeout(() => setCopiedHash(false), 2000);
   };
 
-  // Cálculos para el modal
+  // Lógica para reclamar el dinero
+  const handleClaim = async () => {
+    if (!uid || !selectedTx || !selectedCoin) return;
+    setIsClaiming(true);
+
+    try {
+      // 1. Sumar el saldo a la billetera en Firestore
+      const balanceRef = doc(db, "users", uid, "balances", selectedCoin.symbol.toUpperCase());
+      await setDoc(balanceRef, {
+        amount: increment(parseFloat(selectedTx.amount))
+      }, { merge: true });
+
+      // 2. Guardar el hash como reclamado para que no se pueda volver a reclamar
+      const claimedRef = doc(db, "users", uid, "claimed_transactions", "history");
+      const newClaimedList = [...claimedTxs, selectedTx.hash];
+      await setDoc(claimedRef, { hashes: newClaimedList }, { merge: true });
+      
+      setClaimedTxs(newClaimedList);
+      
+      alert(`✅ ¡Has reclamado ${selectedTx.amount} ${selectedTx.symbol}! Ya está disponible en Tu Billetera.`);
+      setIsTxModalOpen(false);
+    } catch (error) {
+      console.error("Error reclamando:", error);
+      alert("❌ Error al reclamar el dinero. Inténtalo de nuevo.");
+    } finally {
+      setIsClaiming(false);
+    }
+  };
+
   const getTxDetails = (tx: Deposit) => {
     const symbol = tx.symbol.toUpperCase();
     const config = NETWORK_CONFIG[symbol] || NETWORK_CONFIG.DEFAULT;
@@ -154,33 +188,22 @@ export default function HistoryPage() {
     return { progressPercentage, timeString, remainingConf, requiredConf, currentConf };
   };
 
-  if (!ready) return <div className="p-10 text-center text-white">Cargando entorno seguro...</div>;
+  if (!ready) return <div className="p-10 text-center text-white">Cargando...</div>;
   const currentAddress = selectedCoin ? depositAddresses[selectedCoin.id] : null;
+  const isCurrentTxClaimed = selectedTx ? claimedTxs.includes(selectedTx.hash) : false;
 
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10 relative overflow-hidden">
       <motion.div animate={{ scale: [1, 1.2, 1], opacity: [0.1, 0.2, 0.1] }} transition={{ duration: 8, repeat: Infinity }} className="absolute top-0 right-0 w-96 h-96 bg-indigo-500 rounded-full blur-[100px] pointer-events-none" />
 
       <div className="mx-auto max-w-5xl relative z-10">
-        
-        {/* Cabecera */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold text-white mb-2">Ingresos y Historial</h1>
-            <p className="text-slate-400 text-sm">Verificación on-chain en tiempo real.</p>
+            <p className="text-slate-400 text-sm">Verifica y reclama tus fondos.</p>
           </div>
-          {selectedCoin && (
-            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex items-center gap-4 shadow-lg">
-              <div className="h-10 w-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-400"><TrendingUp size={20} /></div>
-              <div>
-                <p className="text-xs text-slate-400">Saldo Confirmado</p>
-                <p className="text-xl font-bold text-white">{balance} <span className="text-sm text-slate-400">{selectedCoin.symbol.toUpperCase()}</span></p>
-              </div>
-            </div>
-          )}
         </motion.div>
 
-        {/* Panel de Control */}
         <div className="mb-8 rounded-3xl border border-slate-800 bg-slate-900/50 p-6 backdrop-blur-xl shadow-2xl">
           <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
             <div className="relative w-full md:w-80" ref={dropdownRef}>
@@ -218,13 +241,11 @@ export default function HistoryPage() {
           )}
         </div>
 
-        {/* Lista de Transacciones */}
         <AnimatePresence>
           {checked && !checking && deposits.length === 0 && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center p-10 bg-slate-900/40 rounded-3xl border border-slate-800">
               <div className="h-16 w-16 bg-slate-800 rounded-full flex items-center justify-center mb-4"><AlertCircle size={32} className="text-slate-500" /></div>
               <h3 className="text-lg font-semibold text-white">No se detectaron transacciones</h3>
-              <p className="text-sm text-slate-400 mt-1">No hay ingresos recientes en esta billetera.</p>
             </motion.div>
           )}
           {deposits.length > 0 && (
@@ -239,7 +260,7 @@ export default function HistoryPage() {
                       </div>
                       <div>
                         <p className="text-lg font-bold text-white flex items-center gap-2">Recibiendo {d.amount} <span className="text-indigo-400">{d.symbol}</span></p>
-                        <p className="text-sm text-slate-400">{d.status === 'confirmed' ? 'Confirmado y añadido al saldo' : `${d.confirmations} confirmaciones (Pendiente)`}</p>
+                        <p className="text-sm text-slate-400">{d.status === 'confirmed' ? 'Confirmado (Reclamar para añadir)' : `${d.confirmations} confirmaciones (Pendiente)`}</p>
                       </div>
                     </div>
                     <span className="text-xs text-indigo-400 font-medium group-hover:underline flex items-center gap-1">Ver detalles <ChevronDown size={14} className="group-hover:translate-y-1 transition-transform" /></span>
@@ -251,14 +272,13 @@ export default function HistoryPage() {
         </AnimatePresence>
       </div>
 
-      {/* MODAL DETALLADO DE TRANSACCIÓN */}
+      {/* MODAL DETALLADO */}
       <AnimatePresence>
         {isTxModalOpen && selectedTx && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-4" onClick={() => setIsTxModalOpen(false)}>
             <motion.div initial={{ scale: 0.9, y: 50, opacity: 0 }} animate={{ scale: 1, y: 0, opacity: 1 }} exit={{ scale: 0.9, y: 50, opacity: 0 }} transition={{ type: "spring", damping: 25, stiffness: 300 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-lg rounded-[2rem] border border-slate-700/50 bg-gradient-to-b from-slate-900 to-slate-950 p-6 sm:p-8 shadow-2xl relative overflow-hidden">
               <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3/4 h-1 bg-gradient-to-r from-transparent via-indigo-500 to-transparent opacity-50" />
               
-              {/* Cabecera Modal */}
               <div className="flex justify-between items-start mb-8">
                 <div className="flex items-center gap-4">
                   <div className="h-14 w-14 rounded-full bg-indigo-500/10 flex items-center justify-center text-indigo-400 border border-indigo-500/20 shadow-[0_0_20px_rgba(99,102,241,0.2)]"><ArrowDownLeft size={28} /></div>
@@ -267,15 +287,13 @@ export default function HistoryPage() {
                 <button onClick={() => setIsTxModalOpen(false)} className="h-10 w-10 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 hover:text-white transition"><X size={20} /></button>
               </div>
 
-              {/* Monto */}
               <div className="text-center mb-8">
                 <div className="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400 mb-2">+{selectedTx.amount} <span className="text-3xl text-indigo-400">{selectedTx.symbol}</span></div>
                 <div className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-semibold ${selectedTx.status === 'confirmed' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'}`}>
-                  {selectedTx.status === 'confirmed' ? <ShieldCheck size={14} /> : <Loader2 size={14} className="animate-spin" />} {selectedTx.status === 'confirmed' ? 'Añadido al saldo' : 'Esperando Confirmaciones'}
+                  {selectedTx.status === 'confirmed' ? <ShieldCheck size={14} /> : <Loader2 size={14} className="animate-spin" />} {selectedTx.status === 'confirmed' ? 'Confirmado' : 'Esperando Confirmaciones'}
                 </div>
               </div>
 
-              {/* Barra de Progreso (Pendiente) */}
               {selectedTx.status === 'pending' && (
                 <div className="mb-8 bg-slate-900/80 rounded-2xl p-5 border border-slate-800">
                   <div className="flex justify-between text-xs font-medium mb-3"><span className="text-slate-400">Progreso de la red</span><span className="text-indigo-400 font-bold">{getTxDetails(selectedTx).currentConf} / {getTxDetails(selectedTx).requiredConf} confirmaciones</span></div>
@@ -293,7 +311,6 @@ export default function HistoryPage() {
                 </div>
               )}
 
-              {/* Detalles Técnicos */}
               <div className="space-y-4 bg-slate-900/50 rounded-2xl p-5 border border-slate-800 mb-6">
                 <div className="flex justify-between items-center text-sm">
                   <span className="text-slate-400 flex items-center gap-2"><Server size={14} /> Red</span>
@@ -314,14 +331,29 @@ export default function HistoryPage() {
                     </button>
                   </div>
                 </div>
-                <div className="h-px w-full bg-slate-800" />
-                <div className="flex justify-between items-center text-sm">
-                  <span className="text-slate-400 flex items-center gap-2"><Clock size={14} /> Fecha</span>
-                  <span className="text-white font-medium">{new Date(selectedTx.timestamp).toLocaleString()}</span>
-                </div>
               </div>
 
-              <a href={`https://blockchair.com/search?q=${selectedTx.hash}`} target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 w-full py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold transition group">
+              {/* BOTÓN DE RECLAMAR */}
+              {selectedTx.status === 'confirmed' && (
+                <div className="mt-6">
+                  {isCurrentTxClaimed ? (
+                    <div className="w-full py-4 rounded-xl bg-slate-800 text-slate-400 text-sm font-semibold flex items-center justify-center gap-2 border border-slate-700">
+                      <CheckCircle2 size={18} /> Dinero ya reclamado
+                    </div>
+                  ) : (
+                    <button 
+                      onClick={handleClaim} 
+                      disabled={isClaiming}
+                      className="w-full py-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 text-white text-lg font-bold shadow-[0_0_20px_rgba(16,185,129,0.3)] transition hover:scale-[1.02] flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                      {isClaiming ? <Loader2 className="animate-spin" size={20} /> : <Gift size={20} />}
+                      {isClaiming ? "Reclamando..." : "Reclamar Dinero"}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <a href={`https://blockchair.com/search?q=${selectedTx.hash}`} target="_blank" rel="noopener noreferrer" className="mt-4 flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold transition group">
                 Ver en Blockchair <ExternalLink size={16} className="text-slate-400 group-hover:text-white" />
               </a>
             </motion.div>
