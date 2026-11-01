@@ -38,11 +38,10 @@ export default function WalletPage() {
   const [sendAddress, setSendAddress] = useState("");
   const [sendAmount, setSendAmount] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [selectedNetwork, setSelectedNetwork] = useState("Ethereum");
+  const [copied, setCopied] = useState(false);
 
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const userAddress: string = embeddedWallet?.address || "";
@@ -120,10 +119,11 @@ export default function WalletPage() {
     return parseFloat(nativeBalance) * ethPrice;
   }, [nativeBalance, coins]);
 
-  // --- GENERACIÓN DE DIRECCIÓN PERMANENTE CON LOCALSTORAGE ---
+  // --- GENERACIÓN / LECTURA DE DIRECCIÓN PERMANENTE ---
   const handleOpenReceive = async (coin: Coin) => {
     if (!embeddedWallet || !uid) return;
 
+    // Si ya la tenemos en memoria para esta sesión, la usamos
     if (depositAddresses[coin.id]) {
       setSelectedCoin(coin);
       setModalType("receive");
@@ -132,28 +132,15 @@ export default function WalletPage() {
 
     setIsGeneratingAddress(true);
     try {
-      // 1. Buscamos la xpub guardada para esta moneda en localStorage
-      const xpubKey = `waevo_xpub_${coin.symbol.toUpperCase()}`;
-      const savedXpub = localStorage.getItem(xpubKey);
-
-      // 2. Llamamos a la API pasándole la xpub (si existe)
+      // Llamamos al backend. El backend buscará en Firestore o generará una nueva si no existe.
       const res = await fetch('/api/generate-address', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          symbol: coin.symbol, 
-          userId: uid,
-          xpub: savedXpub // Puede ser null la primera vez
-        }),
+        body: JSON.stringify({ symbol: coin.symbol, userId: uid }),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Error generando dirección');
-
-      // 3. Guardamos la xpub devuelta en localStorage para futuras sesiones
-      if (data.xpub) {
-        localStorage.setItem(xpubKey, data.xpub);
-      }
 
       setDepositAddresses(prev => ({ ...prev, [coin.id]: data.address }));
       setSelectedCoin(coin);
