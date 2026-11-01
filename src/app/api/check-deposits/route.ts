@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 
-// Mapeo de símbolos a las redes de Blockchair
 const BLOCKCHAIR_CHAIN_MAP: Record<string, string> = {
   BTC: 'bitcoin',
   LTC: 'litecoin',
@@ -9,6 +8,10 @@ const BLOCKCHAIR_CHAIN_MAP: Record<string, string> = {
   ETH: 'ethereum',
   MATIC: 'polygon',
 };
+
+// Caché en memoria para evitar llamadas repetitivas a Blockchair
+const cache = new Map<string, { data: any; timestamp: number }>();
+const CACHE_TTL_MS = 60 * 1000; // Los datos se guardan durante 60 segundos
 
 export async function POST(request: Request) {
   try {
@@ -25,22 +28,36 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `Red no soportada: ${upperSymbol}` }, { status: 400 });
     }
 
-    console.log(`[Blockchair] Verificando ${chain} para la dirección: ${address}`);
+    const cacheKey = `${chain}-${address}`;
+    const cached = cache.get(cacheKey);
 
-    // transaction_details=true es vital para obtener los objetos con block_id y balance_change
+    // 1. Devolver datos desde la caché si son recientes
+    if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
+      console.log(`[Caché] Devolviendo datos guardados para ${cacheKey}`);
+      return NextResponse.json(cached.data);
+    }
+
+    console.log(`[Blockchair] Consultando red ${chain} para: ${address}`);
+
+    // 2. Consultar a Blockchair con los parámetros correctos
     const url = new URL(`https://api.blockchair.com/${chain}/dashboards/address/${address}`);
     url.searchParams.append('transaction_details', 'true');
-    url.searchParams.append('limit', '50'); // Límite seguro
+    url.searchParams.append('limit', '50');
 
     const res = await fetch(url.toString(), {
       headers: { 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(10000), // Timeout de 10s
+      signal: AbortSignal.timeout(10000),
     });
 
+    // 3. Manejo específico del error 430 (IP bloqueada temporalmente)
+    if (res.status === 430) {
+      console.error('❌ Error 430: IP bloqueada temporalmente por Blockchair.');
+      return NextResponse.json({ 
+        error: 'Blockchair ha bloqueado temporalmente la IP por exceso de peticiones. Por favor, espera 1 o 2 minutos antes de volver a intentarlo.' 
+      }, { status: 429 });
+    }
+
     if (!res.ok) {
-      if (res.status === 402 || res.status === 429) {
-        return NextResponse.json({ error: 'Límite de consultas a Blockchair excedido. Espera un minuto.' }, { status: 429 });
-      }
       throw new Error(`Blockchair respondió con estado ${res.status}`);
     }
 
@@ -48,62 +65,51 @@ export async function POST(request: Request) {
     const addressData = json.data?.[address];
 
     if (!addressData) {
-      // La dirección no tiene actividad o no existe en la red
-      return NextResponse.json({ deposits: [], balance: '0' });
+      const emptyResult = { deposits: [], balance: '0' };
+      cache.set(cacheKey, { data: emptyResult, timestamp: Date.now() });
+      return NextResponse.json(emptyResult);
     }
 
-    // 1. Obtener altura actual de la red para calcular confirmaciones
     const currentBlockHeight = json.context?.state;
     if (typeof currentBlockHeight !== 'number') {
       throw new Error('No se pudo obtener la altura de la blockchain');
     }
 
-    // 2. Calcular saldo total (en la unidad mínima, ej. satoshis)
     const balanceRaw = addressData.address?.balance || '0';
-    // 8 decimales para UTXO (BTC, LTC), 18 para EVM (ETH)
     const decimals = (chain === 'ethereum' || chain === 'polygon') ? 18 : 8;
     const balance = (parseFloat(balanceRaw) / Math.pow(10, decimals)).toFixed(8);
 
-    // 3. Procesar transacciones
     const rawTxs = addressData.transactions || [];
     const deposits = [];
 
     for (const tx of rawTxs) {
-      // Solo nos interesan los ingresos (balance_change positivo)
       const balanceChange = parseFloat(tx.balance_change || '0');
       if (balanceChange <= 0) continue;
 
       const blockId = tx.block_id;
       let confirmations = 0;
-
-      // Si block_id es mayor que 0, la transacción está minada
       if (typeof blockId === 'number' && blockId > 0) {
         confirmations = currentBlockHeight - blockId + 1;
       }
 
-      const status = confirmations >= 1 ? 'confirmed' : 'pending';
-      const amount = (balanceChange / Math.pow(10, decimals)).toFixed(8);
-
       deposits.push({
         symbol: upperSymbol,
-        amount: amount,
+        amount: (balanceChange / Math.pow(10, decimals)).toFixed(8),
         hash: tx.hash,
-        status,
+        status: confirmations >= 1 ? 'confirmed' : 'pending',
         confirmations,
         timestamp: tx.time ? new Date(tx.time).getTime() : Date.now(),
       });
     }
 
-    // Ordenar del más reciente al más antiguo
     deposits.sort((a, b) => b.timestamp - a.timestamp);
 
-    console.log(`[Blockchair] Encontrados ${deposits.length} depósitos. Saldo: ${balance}`);
+    const result = { deposits, balance, currentBlockHeight };
 
-    return NextResponse.json({
-      deposits,
-      balance,
-      currentBlockHeight,
-    });
+    // 4. Guardar en caché para la próxima petición
+    cache.set(cacheKey, { data: result, timestamp: Date.now() });
+
+    return NextResponse.json(result);
 
   } catch (error: any) {
     console.error('🔥 [Error en check-deposits]:', error.message);
