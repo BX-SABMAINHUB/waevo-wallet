@@ -1,14 +1,14 @@
 import { NextResponse } from 'next/server';
 import * as bitcoin from 'bitcoinjs-lib';
-import * as ecc from 'tiny-secp256k1';
+import ecc from '@bitcoinerlab/secp256k1'; // 🔥 Cambio clave: sin WASM
 import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
 
-// 🔥 INICIALIZACIÓN CRÍTICA
+// Inicialización
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
 
-// 🔥 INICIALIZACIÓN DE FIREBASE ADMIN (Necesaria en cada ruta de API)
+// Inicialización de Firebase Admin
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
@@ -69,7 +69,7 @@ export async function POST(request: Request) {
     const amountSatoshi = Math.round(parseFloat(amount) * 1e8);
     const feeSatoshi = Math.round(feeCrypto * 1e8);
 
-    // 2. Pedir a BlockCypher que construya la transacción
+    // 2. Construir transacción
     const newTx = {
       inputs: [{ addresses: [fromAddress] }],
       outputs: [
@@ -86,14 +86,13 @@ export async function POST(request: Request) {
 
     const txData = await txRes.json();
     
-    // Si BlockCypher da error (ej. falta de fondos), lo devolvemos como JSON
     if (!txRes.ok || (txData.errors && txData.errors.length > 0)) {
       return NextResponse.json({ 
-        error: `BlockCypher (Error de red): ${txData.errors ? txData.errors.join(', ') : 'Fondos insuficientes o dirección inválida'}` 
+        error: `BlockCypher: ${txData.errors ? txData.errors.join(', ') : 'Fondos insuficientes o dirección inválida'}` 
       }, { status: 400 });
     }
 
-    // 3. Firmar la transacción
+    // 3. Firmar
     const keyPair = ECPair.fromWIF(privateKey, config.network);
     txData.pubkeys = [];
     txData.signatures = txData.tosign.map((tosign: string) => {
@@ -103,7 +102,7 @@ export async function POST(request: Request) {
       return encoded.toString('hex').slice(0, -2);
     });
 
-    // 4. Enviar a la red
+    // 4. Enviar
     const sendRes = await fetch(`${config.baseUrl}/txs/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -113,7 +112,7 @@ export async function POST(request: Request) {
     const finalTx = await sendRes.json();
     
     if (!sendRes.ok) {
-      return NextResponse.json({ error: `Error al enviar a la red: ${JSON.stringify(finalTx)}` }, { status: 400 });
+      return NextResponse.json({ error: `Error al enviar: ${JSON.stringify(finalTx)}` }, { status: 400 });
     }
 
     return NextResponse.json({
@@ -123,7 +122,6 @@ export async function POST(request: Request) {
 
   } catch (error: any) {
     console.error('🔥 [Error Crítico en send-blockcypher]:', error);
-    // 🔥 FORZAMOS A QUE SIEMPRE DEVUELVA UN JSON VÁLIDO
     return NextResponse.json({ 
       error: error.message || 'Error interno del servidor al procesar la transacción' 
     }, { status: 500 });
