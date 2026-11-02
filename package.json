@@ -12,6 +12,10 @@
   "dependencies": {
     "@emailjs/nodejs": "^4.0.0",
     "@privy-io/react-auth": "^3.50.0",
+    "@solana-program/memo": "^0.6.0",
+    "@solana-program/system": "^0.6.0",
+    "@solana-program/token": "^0.6.0",
+    "@solana/kit": "^3.0.0",
     "bitcoinjs-lib": "^6.1.6",
     "ecpair": "^2.1.0",
     "firebase": "^11.1.0",
