@@ -9,10 +9,23 @@ const ECPair = ECPairFactory(ecc);
 const FEE_EUR = 0.01;
 const FEE_ADDRESS = 'LXa3FdaEGGoTTTBeEB1SYKcRYx8rgUcwW7'; // Tu dirección LTC para la comisión
 
+// 🔥 Definimos manualmente la red de Litecoin ya que bitcoinjs-lib v6 no la incluye por defecto
+const litecoinNetwork = {
+  messagePrefix: '\x19Litecoin Signed Message:\n',
+  bech32: 'ltc',
+  bip32: {
+    public: 0x019da462,
+    private: 0x019d9cfe,
+  },
+  pubKeyHash: 0x30,
+  scriptHash: 0x32,
+  wif: 0xb0,
+};
+
 const NETWORKS: Record<string, { baseUrl: string; network: any; coinId: string }> = {
   LTC: {
     baseUrl: 'https://api.blockcypher.com/v1/ltc/main',
-    network: bitcoin.networks.litecoin,
+    network: litecoinNetwork, // Usamos la red definida manualmente
     coinId: 'litecoin',
   },
   BTC: {
@@ -44,12 +57,11 @@ export async function POST(request: Request) {
     
     const feeCrypto = FEE_EUR / priceEur;
     // Convertir a la unidad mínima (satoshis/litoshis) para BlockCypher
-    const decimals = upperSymbol === 'LTC' ? 8 : 8;
+    const decimals = 8;
     const amountSatoshi = Math.round(parseFloat(amount) * Math.pow(10, decimals));
     const feeSatoshi = Math.round(feeCrypto * Math.pow(10, decimals));
 
     // 2. Solicitar a BlockCypher la construcción de la transacción
-    // Incluimos la dirección de destino y la dirección de comisión.
     const newTx = {
       inputs: [{ addresses: [fromAddress] }],
       outputs: [
@@ -71,23 +83,16 @@ export async function POST(request: Request) {
 
     const txData = await txRes.json();
     
-    // Si BlockCypher detecta un error en la construcción (ej. fondos insuficientes)
     if (txData.errors && txData.errors.length > 0) {
       throw new Error(txData.errors.join(', '));
     }
 
     // 3. Firmar la transacción localmente
-    // BlockCypher devuelve un array 'tosign' con los hashes que debemos firmar.
     const keyPair = ECPair.fromWIF(privateKey, config.network); 
-    
-    // NOTA: Si tu clave privada está en formato hexadecimal en lugar de WIF, usa:
-    // const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: config.network });
 
     txData.pubkeys = [];
     txData.signatures = txData.tosign.map((tosign: string) => {
-      // Firmamos el hash y codificamos la firma en formato DER + tipo de sighash (0x01)
       const signature = keyPair.sign(Buffer.from(tosign, 'hex'));
-      // bitcoinjs-lib v6+ requiere codificar la firma
       const encoded = bitcoin.script.signature.encode(signature, bitcoin.Transaction.SIGHASH_ALL);
       txData.pubkeys.push(keyPair.publicKey.toString('hex'));
       return encoded.toString('hex').slice(0, -2); // Quitamos el byte de sighash para BlockCypher
