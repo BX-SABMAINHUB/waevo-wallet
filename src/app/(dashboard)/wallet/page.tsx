@@ -4,17 +4,14 @@ import { useState, useEffect, useMemo } from "react";
 import { useWallets, usePrivy } from "@privy-io/react-auth";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
-import { doc, onSnapshot, collection } from "firebase/firestore";
+import { collection, onSnapshot } from "firebase/firestore";
 import { db, auth } from "@/lib/firebase";
 import { 
   Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, 
   Wallet, Loader2, TrendingUp, TrendingDown, Coins, 
-  AlertCircle, Send, ShieldAlert, Key
+  AlertCircle, Send, ShieldAlert, Key, ExternalLink
 } from "lucide-react";
 
-// ==========================================
-// TIPOS E INTERFACES
-// ==========================================
 interface Coin {
   id: string;
   symbol: string;
@@ -24,67 +21,46 @@ interface Coin {
   price_change_percentage_24h: number;
 }
 
-const FEE_EUR = 0.01; // Comisión fija en Euros
-
 export default function WalletPage() {
   const { ready, authenticated, login } = usePrivy();
   const { wallets } = useWallets();
 
-  // ==========================================
-  // ESTADOS
-  // ==========================================
   const [coins, setCoins] = useState<Coin[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
-  
-  // Modales
   const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
   const [modalType, setModalType] = useState<"receive" | "send" | null>(null);
   
-  // Saldos y direcciones
   const [coinBalances, setCoinBalances] = useState<Record<string, number>>({});
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Estados del formulario de envío
+  // Estados para el envío
   const [sendAddress, setSendAddress] = useState("");
   const [sendAmount, setSendAmount] = useState("");
   const [privateKey, setPrivateKey] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendSuccess, setSendSuccess] = useState<string | null>(null);
+  const [explorerUrl, setExplorerUrl] = useState<string | null>(null);
 
-  const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
   const uid = auth.currentUser?.uid || "";
 
-  // ==========================================
-  // EFECTOS
-  // ==========================================
-
-  // 1. Cargar precios de las monedas
   useEffect(() => {
     async function fetchCoins() {
       try {
-        const res = await fetch(
-          "https://api.coingecko.com/api/v3/coins/markets?vs_currency=eur&order=market_cap_desc&per_page=100&page=1&sparkline=false"
-        );
+        const res = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=eur&order=market_cap_desc&per_page=100&page=1&sparkline=false");
         const data = await res.json();
         setCoins(data);
-      } catch (error) {
-        console.error("Error fetching coins:", error);
-      } finally {
-        setLoading(false);
-      }
+      } catch (error) { console.error("Error fetching coins:", error); }
+      finally { setLoading(false); }
     }
     fetchCoins();
-    
-    // Actualizar precios cada 60 segundos
     const interval = setInterval(fetchCoins, 60000);
     return () => clearInterval(interval);
   }, []);
 
-  // 2. Escuchar saldos en tiempo real desde Firestore
   useEffect(() => {
     if (!uid) return;
     const balancesRef = collection(db, "users", uid, "balances");
@@ -99,17 +75,6 @@ export default function WalletPage() {
     return () => unsubscribe();
   }, [uid]);
 
-  // ==========================================
-  // LÓGICA DE ACCIONES
-  // ==========================================
-
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  // Generar dirección para recibir
   const handleOpenReceive = async (coin: Coin) => {
     if (!uid) return;
     if (depositAddresses[coin.symbol]) {
@@ -136,7 +101,6 @@ export default function WalletPage() {
     }
   };
 
-  // Abrir modal de envío (solo si hay saldo)
   const handleOpenSend = (coin: Coin) => {
     const balance = coinBalances[coin.symbol.toUpperCase()] || 0;
     if (balance <= 0) {
@@ -147,52 +111,53 @@ export default function WalletPage() {
     setModalType("send");
     setSendError(null);
     setSendSuccess(null);
+    setExplorerUrl(null);
     setSendAddress("");
     setSendAmount("");
     setPrivateKey("");
   };
 
-  // Procesar el envío
+  // 🔥 AQUÍ SE CONECTA CON TU NUEVO ENDPOINT DE BLOCKCYPHER 🔥
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedCoin) return;
 
     setSendError(null);
     setSendSuccess(null);
+    setExplorerUrl(null);
 
     const balance = coinBalances[selectedCoin.symbol.toUpperCase()] || 0;
     const amount = parseFloat(sendAmount);
     
-    // Calcular comisión estimada en cripto
-    const feeCrypto = FEE_EUR / (selectedCoin.current_price || 1);
+    // Calcular comisión estimada (0.01 €)
+    const feeCrypto = 0.01 / (selectedCoin.current_price || 1);
     const totalNeeded = amount + feeCrypto;
 
-    // Validaciones
     if (isNaN(amount) || amount <= 0) {
       setSendError("La cantidad debe ser mayor a 0.");
       return;
     }
     if (totalNeeded > balance) {
-      setSendError(`Saldo insuficiente. Necesitas ${totalNeeded.toFixed(6)} ${selectedCoin.symbol} (incluyendo la comisión de 0.01€).`);
+      setSendError(`Saldo insuficiente. Necesitas ${totalNeeded.toFixed(6)} ${selectedCoin.symbol} (incluyendo la comisión).`);
       return;
     }
     if (!privateKey.trim()) {
-      setSendError("Debes introducir la clave privada para firmar la transacción.");
+      setSendError("Debes introducir la clave privada (WIF) para firmar la transacción.");
       return;
     }
 
     setIsSending(true);
 
     try {
-      const res = await fetch('/api/send-transaction', {
+      const res = await fetch('/api/send-blockcypher', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           symbol: selectedCoin.symbol,
-          fromAddress: depositAddresses[selectedCoin.symbol], // La dirección asociada
+          fromAddress: depositAddresses[selectedCoin.symbol], // La dirección de depósito
           toAddress: sendAddress,
           amount: amount,
-          privateKey: privateKey,
+          privateKey: privateKey, // Clave en formato WIF
         }),
       });
 
@@ -200,7 +165,8 @@ export default function WalletPage() {
       if (!res.ok) throw new Error(data.error || 'Error al enviar la transacción');
 
       // Éxito
-      setSendSuccess(`✅ Transacción enviada con éxito. Hash: ${data.txId}`);
+      setSendSuccess(`✅ Transacción enviada con éxito.`);
+      setExplorerUrl(data.explorerUrl);
       setSendAmount("");
       setSendAddress("");
       setPrivateKey("");
@@ -216,7 +182,6 @@ export default function WalletPage() {
     (coin) => coin.name.toLowerCase().includes(search.toLowerCase()) || coin.symbol.toLowerCase().includes(search.toLowerCase())
   );
 
-  // Calcular el valor total en EUR
   const totalEur = useMemo(() => {
     let total = 0;
     Object.entries(coinBalances).forEach(([symbol, amount]) => {
@@ -240,14 +205,10 @@ export default function WalletPage() {
     );
   }
 
-  // ==========================================
-  // RENDERIZADO
-  // ==========================================
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
         
-        {/* CABECERA */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-10 rounded-3xl border border-indigo-500/20 bg-gradient-to-br from-indigo-900/40 to-slate-900/80 p-8 shadow-xl relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500 rounded-full blur-[100px] opacity-20 pointer-events-none" />
           <div className="relative z-10">
@@ -257,13 +218,9 @@ export default function WalletPage() {
             <h1 className="text-4xl md:text-5xl font-bold text-white tracking-tight">
               €{totalEur.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </h1>
-            <p className="text-sm text-slate-400 mt-2">
-              Este es el saldo total de todas tus monedas confirmadas.
-            </p>
           </div>
         </motion.div>
 
-        {/* LISTA DE MONEDAS */}
         <div className="mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <h2 className="text-2xl font-bold text-white">Tus Activos</h2>
           <div className="relative w-full md:w-72">
@@ -308,9 +265,6 @@ export default function WalletPage() {
         </div>
       </div>
 
-      {/* ========================================== */}
-      {/* MODAL 1: MENÚ DE ACCIONES (ENVIAR / RECIBIR) */}
-      {/* ========================================== */}
       <AnimatePresence>
         {selectedCoin && !modalType && (
           <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setSelectedCoin(null)}>
@@ -336,16 +290,7 @@ export default function WalletPage() {
                   <span className="font-semibold text-white">Recibir</span>
                 </button>
                 
-                {/* BOTÓN DE ENVIAR: Deshabilitado si no hay saldo */}
-                <button 
-                  onClick={() => handleOpenSend(selectedCoin)} 
-                  disabled={(coinBalances[selectedCoin.symbol.toUpperCase()] || 0) <= 0}
-                  className={`flex flex-col items-center gap-2 rounded-2xl p-6 transition ${
-                    (coinBalances[selectedCoin.symbol.toUpperCase()] || 0) > 0 
-                      ? 'bg-slate-800 hover:bg-slate-700 cursor-pointer' 
-                      : 'bg-slate-800/50 opacity-50 cursor-not-allowed'
-                  }`}
-                >
+                <button onClick={() => handleOpenSend(selectedCoin)} disabled={(coinBalances[selectedCoin.symbol.toUpperCase()] || 0) <= 0} className={`flex flex-col items-center gap-2 rounded-2xl p-6 transition ${(coinBalances[selectedCoin.symbol.toUpperCase()] || 0) > 0 ? 'bg-slate-800 hover:bg-slate-700 cursor-pointer' : 'bg-slate-800/50 opacity-50 cursor-not-allowed'}`}>
                   <ArrowUpRight className={(coinBalances[selectedCoin.symbol.toUpperCase()] || 0) > 0 ? "text-indigo-400" : "text-slate-500"} size={24} />
                   <span className={`font-semibold ${(coinBalances[selectedCoin.symbol.toUpperCase()] || 0) > 0 ? 'text-white' : 'text-slate-500'}`}>Enviar</span>
                 </button>
@@ -355,9 +300,6 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* ========================================== */}
-      {/* MODAL 2: RECIBIR (DIRECCIÓN REAL) */}
-      {/* ========================================== */}
       <AnimatePresence>
         {modalType === "receive" && selectedCoin && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => setModalType(null)}>
@@ -365,26 +307,18 @@ export default function WalletPage() {
               <button onClick={() => setModalType(null)} className="absolute top-4 right-4 text-slate-400 hover:text-white bg-slate-800 p-2 rounded-full"><X size={20} /></button>
               <h3 className="text-2xl font-bold text-white mb-2">Recibir {selectedCoin.name}</h3>
               <p className="text-sm text-slate-400 mb-6">Esta es tu dirección real y permanente.</p>
-              
-              <div className="bg-white p-4 rounded-2xl inline-block mb-6 shadow-lg">
-                <QRCodeSVG value={depositAddresses[selectedCoin.symbol] || "0x0"} size={200} />
-              </div>
-              
+              <div className="bg-white p-4 rounded-2xl inline-block mb-6 shadow-lg"><QRCodeSVG value={depositAddresses[selectedCoin.symbol] || "0x0"} size={200} /></div>
               <div className="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3 border border-slate-700">
                 <span className="text-sm font-mono text-slate-300 truncate">{depositAddresses[selectedCoin.symbol]}</span>
-                <button onClick={() => copyToClipboard(depositAddresses[selectedCoin.symbol])} className="text-indigo-400 hover:text-white">
+                <button onClick={() => { navigator.clipboard.writeText(depositAddresses[selectedCoin.symbol]); setCopied(true); setTimeout(() => setCopied(false), 2000); }} className="text-indigo-400 hover:text-white">
                   {copied ? <CheckCircle2 size={20} className="text-emerald-400" /> : <Copy size={20} />}
                 </button>
               </div>
-              <p className="text-xs text-slate-500 mt-4">Envía únicamente {selectedCoin.symbol.toUpperCase()} a esta dirección.</p>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
 
-      {/* ========================================== */}
-      {/* MODAL 3: ENVIAR (TRANSACCIÓN REAL) */}
-      {/* ========================================== */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => setModalType(null)}>
@@ -394,7 +328,6 @@ export default function WalletPage() {
                 <button onClick={() => setModalType(null)} className="text-slate-400 hover:text-white bg-slate-800 p-2 rounded-full"><X size={20} /></button>
               </div>
 
-              {/* Info de Saldo y Comisión */}
               <div className="mb-6 flex justify-between text-xs bg-slate-950/50 p-3 rounded-lg border border-slate-800">
                 <div>
                   <p className="text-slate-400">Disponible</p>
@@ -407,81 +340,41 @@ export default function WalletPage() {
               </div>
               
               <form onSubmit={handleSend} className="space-y-4">
-                {/* Dirección */}
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-1">Dirección del destinatario ({selectedCoin.symbol})</label>
-                  <input 
-                    type="text" 
-                    required 
-                    value={sendAddress} 
-                    onChange={e => setSendAddress(e.target.value)} 
-                    placeholder={`Dirección ${selectedCoin.symbol}...`} 
-                    className="w-full p-3 rounded-xl bg-slate-800 text-white outline-none focus:border-indigo-500 border border-slate-700 font-mono text-sm" 
-                  />
+                  <input type="text" required value={sendAddress} onChange={e => setSendAddress(e.target.value)} placeholder={`Dirección ${selectedCoin.symbol}...`} className="w-full p-3 rounded-xl bg-slate-800 text-white outline-none focus:border-indigo-500 border border-slate-700 font-mono text-sm" />
                 </div>
 
-                {/* Cantidad */}
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-1">Cantidad a enviar</label>
-                  <div className="relative">
-                    <input 
-                      type="number" 
-                      step="any" 
-                      required 
-                      value={sendAmount} 
-                      onChange={e => setSendAmount(e.target.value)} 
-                      placeholder="0.00" 
-                      className="w-full p-3 rounded-xl bg-slate-800 text-white outline-none focus:border-indigo-500 border border-slate-700" 
-                    />
-                    <button 
-                      type="button"
-                      onClick={() => setSendAmount((coinBalances[selectedCoin.symbol.toUpperCase()] || 0).toString())}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-indigo-400 font-semibold"
-                    >
-                      MAX
-                    </button>
-                  </div>
+                  <input type="number" step="any" required value={sendAmount} onChange={e => setSendAmount(e.target.value)} placeholder="0.00" className="w-full p-3 rounded-xl bg-slate-800 text-white outline-none focus:border-indigo-500 border border-slate-700" />
                 </div>
 
-                {/* Clave Privada (Advertencia de seguridad) */}
                 <div className="bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg">
                   <label className="flex items-center gap-2 text-xs font-medium text-amber-400 mb-2">
-                    <Key size={14} /> Clave Privada (Para firmar)
+                    <Key size={14} /> Clave Privada WIF (Para firmar)
                   </label>
-                  <input 
-                    type="password" 
-                    required 
-                    value={privateKey} 
-                    onChange={e => setPrivateKey(e.target.value)} 
-                    placeholder="Introduce tu clave privada..." 
-                    className="w-full p-3 rounded-xl bg-slate-900 text-white outline-none focus:border-amber-500 border border-slate-700 font-mono text-sm" 
-                  />
-                  <p className="text-[10px] text-amber-500/70 mt-2 flex items-start gap-1">
-                    <ShieldAlert size={12} className="mt-0.5 flex-shrink-0" />
-                    Nunca compartas tu clave privada. En producción, esto se gestiona con Tatum KMS de forma segura.
-                  </p>
+                  <input type="password" required value={privateKey} onChange={e => setPrivateKey(e.target.value)} placeholder="L1a2b3c4d5..." className="w-full p-3 rounded-xl bg-slate-900 text-white outline-none focus:border-amber-500 border border-slate-700 font-mono text-sm" />
                 </div>
 
-                {/* Feedback */}
                 {sendError && (
                   <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-lg flex items-start gap-2">
-                    <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
-                    {sendError}
+                    <AlertCircle size={14} className="flex-shrink-0 mt-0.5" /> {sendError}
                   </div>
                 )}
                 {sendSuccess && (
-                  <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs rounded-lg flex items-start gap-2">
-                    <CheckCircle2 size={14} className="flex-shrink-0 mt-0.5" />
-                    {sendSuccess}
+                  <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs rounded-lg flex flex-col gap-2">
+                    <div className="flex items-center gap-2"><CheckCircle2 size={14} /> {sendSuccess}</div>
+                    {explorerUrl && (
+                      <a href={explorerUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 underline">
+                        Ver transacción en Blockchair <ExternalLink size={12} />
+                      </a>
+                    )}
                   </div>
                 )}
 
-                <button 
-                  type="submit" 
-                  disabled={isSending} 
-                  className="w-full bg-gradient-to-r from-indigo-500 to-cyan-400 hover:from-indigo-600 hover:to-cyan-500 p-3 rounded-xl text-white font-bold transition disabled:opacity-50 mt-4 flex items-center justify-center gap-2"
-                >
-                  {isSending ? <><Loader2 className="animate-spin" size={18} /> Enviando...</> : <><Send size={18} /> Confirmar Envío</>}
+                <button type="submit" disabled={isSending} className="w-full bg-gradient-to-r from-indigo-500 to-cyan-400 hover:from-indigo-600 hover:to-cyan-500 p-3 rounded-xl text-white font-bold transition disabled:opacity-50 mt-4 flex items-center justify-center gap-2">
+                  {isSending ? <><Loader2 className="animate-spin" size={18} /> Firmando y enviando...</> : <><Send size={18} /> Confirmar Envío</>}
                 </button>
               </form>
             </motion.div>
