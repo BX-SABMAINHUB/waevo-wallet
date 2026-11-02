@@ -7,7 +7,6 @@ import * as admin from 'firebase-admin';
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
 
-// Inicialización de Firebase Admin
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
@@ -60,24 +59,30 @@ export async function POST(request: Request) {
     
     const walletData = walletDoc.data()!;
     const fromAddress = walletData.address;
-    const privateKey = walletData.privateKey;
+    let privateKey = walletData.privateKey ? walletData.privateKey.trim() : '';
 
-    // 🔥 VALIDACIÓN CRÍTICA: Comprobar que la clave privada existe y es un string
-    if (!privateKey || typeof privateKey !== 'string') {
+    // 🔥 1. VALIDACIÓN DE SEGURIDAD EXTREMA
+    // Si la clave está vacía, empieza por 02/03 (clave pública) o mide 66 caracteres, es inválida.
+    if (!privateKey || privateKey.startsWith('02') || privateKey.startsWith('03') || privateKey.length === 66) {
       return NextResponse.json({ 
-        error: 'La clave privada de esta billetera no es válida o está corrupta. Por favor, borra esta billetera en Firestore y genera una nueva en "Recibir".' 
+        error: 'La base de datos contiene una CLAVE PÚBLICA en lugar de una privada. Por favor, borra esta billetera en Firestore (usuarios > tu UID > wallets > LTC) y vuelve a generarla en "Recibir".' 
       }, { status: 400 });
     }
 
-    // 🔥 INTENTAR CREAR EL KEYPAIR (Aquí es donde saltaba el error)
     let keyPair;
     try {
+      // Intentamos leerla como WIF (formato estándar de Litecoin)
       keyPair = ECPair.fromWIF(privateKey, config.network);
-    } catch (error: any) {
-      console.error('Error al parsear WIF:', error.message);
-      return NextResponse.json({ 
-        error: `La clave privada guardada no es un WIF válido para ${upperSymbol}. (Detalle: ${error.message}). Borra esta billetera en Firestore y genera una nueva.` 
-      }, { status: 400 });
+    } catch (errorWIF: any) {
+      try {
+        // Si falla, intentamos leerla como Hexadecimal (por si BlockCypher la devolvió así)
+        const hexKey = privateKey.replace('0x', '');
+        keyPair = ECPair.fromPrivateKey(Buffer.from(hexKey, 'hex'), { network: config.network });
+      } catch (errorHex: any) {
+        return NextResponse.json({ 
+          error: `La clave privada guardada no es válida. Detalle: ${errorWIF.message}. Borra la billetera en Firestore y genera una nueva.` 
+        }, { status: 400 });
+      }
     }
 
     // 2. Calcular la comisión
