@@ -4,10 +4,25 @@ import * as ecc from 'tiny-secp256k1';
 import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
 
-// 🔥 INICIALIZACIÓN CRÍTICA DE BITCOINJS-LIB
+// 🔥 INICIALIZACIÓN CRÍTICA
 bitcoin.initEccLib(ecc);
-
 const ECPair = ECPairFactory(ecc);
+
+// 🔥 INICIALIZACIÓN DE FIREBASE ADMIN (Necesaria en cada ruta de API)
+if (!admin.apps.length) {
+  try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
+    if (serviceAccount.private_key) {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      projectId: "waevo-wallet"
+    });
+  } catch (error) {
+    console.error('❌ Error inicializando Firebase Admin:', error);
+  }
+}
 
 const FEE_EUR = 0.01;
 const FEE_ADDRESS = 'LXa3FdaEGGoTTTBeEB1SYKcRYx8rgUcwW7';
@@ -46,6 +61,7 @@ export async function POST(request: Request) {
     
     const { address: fromAddress, privateKey } = walletDoc.data()!;
 
+    // 1. Calcular comisión
     const priceRes = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${config.coinId}&vs_currencies=eur`);
     const priceData = await priceRes.json();
     const feeCrypto = FEE_EUR / (priceData[config.coinId]?.eur || 1);
@@ -53,6 +69,7 @@ export async function POST(request: Request) {
     const amountSatoshi = Math.round(parseFloat(amount) * 1e8);
     const feeSatoshi = Math.round(feeCrypto * 1e8);
 
+    // 2. Pedir a BlockCypher que construya la transacción
     const newTx = {
       inputs: [{ addresses: [fromAddress] }],
       outputs: [
@@ -69,14 +86,14 @@ export async function POST(request: Request) {
 
     const txData = await txRes.json();
     
-    if (!txRes.ok) {
-      return NextResponse.json({ error: `BlockCypher: ${JSON.stringify(txData.errors || txData)}` }, { status: 400 });
-    }
-    if (txData.errors && txData.errors.length > 0) {
-      return NextResponse.json({ error: `BlockCypher: ${txData.errors.join(', ')}` }, { status: 400 });
+    // Si BlockCypher da error (ej. falta de fondos), lo devolvemos como JSON
+    if (!txRes.ok || (txData.errors && txData.errors.length > 0)) {
+      return NextResponse.json({ 
+        error: `BlockCypher (Error de red): ${txData.errors ? txData.errors.join(', ') : 'Fondos insuficientes o dirección inválida'}` 
+      }, { status: 400 });
     }
 
-    // Firmar
+    // 3. Firmar la transacción
     const keyPair = ECPair.fromWIF(privateKey, config.network);
     txData.pubkeys = [];
     txData.signatures = txData.tosign.map((tosign: string) => {
@@ -86,7 +103,7 @@ export async function POST(request: Request) {
       return encoded.toString('hex').slice(0, -2);
     });
 
-    // Enviar
+    // 4. Enviar a la red
     const sendRes = await fetch(`${config.baseUrl}/txs/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -96,7 +113,7 @@ export async function POST(request: Request) {
     const finalTx = await sendRes.json();
     
     if (!sendRes.ok) {
-      return NextResponse.json({ error: `Error al enviar: ${JSON.stringify(finalTx.errors || finalTx)}` }, { status: 400 });
+      return NextResponse.json({ error: `Error al enviar a la red: ${JSON.stringify(finalTx)}` }, { status: 400 });
     }
 
     return NextResponse.json({
@@ -105,7 +122,10 @@ export async function POST(request: Request) {
     });
 
   } catch (error: any) {
-    console.error('🔥 [Error en send-blockcypher]:', error.message);
-    return NextResponse.json({ error: error.message || 'Error interno del servidor' }, { status: 500 });
+    console.error('🔥 [Error Crítico en send-blockcypher]:', error);
+    // 🔥 FORZAMOS A QUE SIEMPRE DEVUELVA UN JSON VÁLIDO
+    return NextResponse.json({ 
+      error: error.message || 'Error interno del servidor al procesar la transacción' 
+    }, { status: 500 });
   }
 }
