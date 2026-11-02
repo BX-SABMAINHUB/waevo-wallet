@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
 import * as bitcoin from 'bitcoinjs-lib';
-import ecc from '@bitcoinerlab/secp256k1'; // 🔥 Cambio clave: sin WASM
+import ecc from '@bitcoinerlab/secp256k1'; // 🔥 Usamos la librería sin WASM
 import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
 
-// Inicialización
+// Inicialización de la librería criptográfica
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
 
@@ -25,8 +25,9 @@ if (!admin.apps.length) {
 }
 
 const FEE_EUR = 0.01;
-const FEE_ADDRESS = 'LXa3FdaEGGoTTTBeEB1SYKcRYx8rgUcwW7';
+const FEE_ADDRESS = 'LXa3FdaEGGoTTTBeEB1SYKcRYx8rgUcwW7'; // Dirección de comisión
 
+// Configuración manual de la red Litecoin para bitcoinjs-lib
 const litecoinNetwork = {
   messagePrefix: '\x19Litecoin Signed Message:\n',
   bech32: 'ltc',
@@ -51,6 +52,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Faltan parámetros obligatorios' }, { status: 400 });
     }
 
+    // 1. Obtener la billetera (dirección y clave privada) desde Firestore
     const db = admin.firestore();
     const walletRef = db.collection('users').doc(userId).collection('wallets').doc(upperSymbol);
     const walletDoc = await walletRef.get();
@@ -61,7 +63,7 @@ export async function POST(request: Request) {
     
     const { address: fromAddress, privateKey } = walletDoc.data()!;
 
-    // 1. Calcular comisión
+    // 2. Calcular la comisión en cripto (0.01€)
     const priceRes = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${config.coinId}&vs_currencies=eur`);
     const priceData = await priceRes.json();
     const feeCrypto = FEE_EUR / (priceData[config.coinId]?.eur || 1);
@@ -69,7 +71,7 @@ export async function POST(request: Request) {
     const amountSatoshi = Math.round(parseFloat(amount) * 1e8);
     const feeSatoshi = Math.round(feeCrypto * 1e8);
 
-    // 2. Construir transacción
+    // 3. Solicitar a BlockCypher que construya la transacción
     const newTx = {
       inputs: [{ addresses: [fromAddress] }],
       outputs: [
@@ -86,23 +88,28 @@ export async function POST(request: Request) {
 
     const txData = await txRes.json();
     
+    // 🔥 CORRECCIÓN: Extraer el texto real del error de los objetos de BlockCypher
     if (!txRes.ok || (txData.errors && txData.errors.length > 0)) {
+      const errorMessages = txData.errors
+        ? txData.errors.map((e: any) => e.error || JSON.stringify(e)).join(' | ')
+        : 'Fondos insuficientes o dirección inválida';
+      
       return NextResponse.json({ 
-        error: `BlockCypher: ${txData.errors ? txData.errors.join(', ') : 'Fondos insuficientes o dirección inválida'}` 
+        error: `BlockCypher: ${errorMessages}` 
       }, { status: 400 });
     }
 
-    // 3. Firmar
+    // 4. Firmar la transacción con la clave privada guardada en Firestore
     const keyPair = ECPair.fromWIF(privateKey, config.network);
     txData.pubkeys = [];
     txData.signatures = txData.tosign.map((tosign: string) => {
       const signature = keyPair.sign(Buffer.from(tosign, 'hex'));
       const encoded = bitcoin.script.signature.encode(signature, bitcoin.Transaction.SIGHASH_ALL);
       txData.pubkeys.push(keyPair.publicKey.toString('hex'));
-      return encoded.toString('hex').slice(0, -2);
+      return encoded.toString('hex').slice(0, -2); // Quitamos el byte de sighash
     });
 
-    // 4. Enviar
+    // 5. Enviar la transacción firmada a la red
     const sendRes = await fetch(`${config.baseUrl}/txs/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -112,7 +119,11 @@ export async function POST(request: Request) {
     const finalTx = await sendRes.json();
     
     if (!sendRes.ok) {
-      return NextResponse.json({ error: `Error al enviar: ${JSON.stringify(finalTx)}` }, { status: 400 });
+      const sendErrorMessages = finalTx.errors
+        ? finalTx.errors.map((e: any) => e.error || JSON.stringify(e)).join(' | ')
+        : JSON.stringify(finalTx);
+        
+      return NextResponse.json({ error: `Error al enviar a la red: ${sendErrorMessages}` }, { status: 400 });
     }
 
     return NextResponse.json({
