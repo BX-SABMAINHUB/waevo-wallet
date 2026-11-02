@@ -1,34 +1,26 @@
 import { NextResponse } from 'next/server';
 import * as admin from 'firebase-admin';
 
-// 🔥 CRÍTICO: Obliga a Next.js a ejecutar esta API en cada petición, sin usar caché.
 export const dynamic = 'force-dynamic';
 
-// Mapeo de redes soportadas por BlockCypher
 const NETWORKS: Record<string, string> = {
   LTC: 'ltc',
   BTC: 'btc',
   DOGE: 'doge',
 };
 
-// Inicialización robusta de Firebase Admin
 if (!admin.apps.length) {
   try {
     const serviceAccountString = process.env.FIREBASE_SERVICE_ACCOUNT;
     if (!serviceAccountString) throw new Error('Falta FIREBASE_SERVICE_ACCOUNT');
-
     const serviceAccount = JSON.parse(serviceAccountString);
-    
-    // Limpieza de la clave privada (evita errores de saltos de línea en Vercel)
     if (serviceAccount.private_key) {
       serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
     }
-
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
       projectId: "waevo-wallet"
     });
-    console.log('✅ Firebase Admin inicializado en generate-address');
   } catch (error) {
     console.error('❌ Error inicializando Firebase Admin:', error);
   }
@@ -41,48 +33,53 @@ export async function POST(request: Request) {
     const chain = NETWORKS[upperSymbol];
 
     if (!upperSymbol || !userId || !chain) {
-      return NextResponse.json({ error: 'Parámetros inválidos o red no soportada' }, { status: 400 });
+      return NextResponse.json({ error: 'Parámetros inválidos' }, { status: 400 });
     }
 
     const db = admin.firestore();
     const walletRef = db.collection('users').doc(userId).collection('wallets').doc(upperSymbol);
 
-    // 1. Comprobar si ya existe una billetera guardada en Firestore
+    // 1. Buscar en Firestore
     const docSnap = await walletRef.get();
+    
     if (docSnap.exists) {
-      console.log(`[Firestore] Dirección recuperada para ${upperSymbol}: ${docSnap.data()?.address}`);
-      return NextResponse.json({ address: docSnap.data()?.address });
+      const savedAddress = docSnap.data()?.address;
+      
+      // 🔥 AUTO-CORRECCIÓN: Si la dirección guardada no parece válida (es un hash de clave pública o Tatum)
+      // Las direcciones reales de LTC/BTC no miden 66 caracteres ni empiezan por 02/03.
+      if (savedAddress && savedAddress.length < 50 && !savedAddress.startsWith('02') && !savedAddress.startsWith('03')) {
+        console.log(`[Firestore] Dirección válida recuperada: ${savedAddress}`);
+        return NextResponse.json({ address: savedAddress });
+      } else {
+        console.log(`[Firestore] ⚠️ Dirección inválida detectada (${savedAddress}). Generando una nueva...`);
+        // Si es inválida, no la devolvemos. Pasamos al paso 2 para generar una nueva.
+      }
     }
 
-    // 2. Si no existe, generamos una nueva con BlockCypher
-    console.log(`[BlockCypher] Generando nueva dirección para ${upperSymbol}...`);
+    // 2. Generar nueva dirección con BlockCypher
+    console.log(`[BlockCypher] Solicitando nueva dirección para ${upperSymbol}...`);
     const res = await fetch(`https://api.blockcypher.com/v1/${chain}/main/addrs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     });
 
-    if (!res.ok) {
-      const errText = await res.text();
-      console.error(`[BlockCypher] Error ${res.status}: ${errText}`);
-      throw new Error('Error generando dirección en BlockCypher');
-    }
-    
+    if (!res.ok) throw new Error('Error generando dirección en BlockCypher');
     const data = await res.json();
 
-    // 3. Guardamos la dirección REAL (data.address) y la clave privada WIF (data.private)
+    // 3. Guardar la dirección REAL (data.address) en Firestore
+    // Al usar { merge: true }, sobrescribimos el registro inválido si ya existía.
     await walletRef.set({
-      address: data.address,    // 🔥 Aquí está la corrección (antes ponía data.public)
-      privateKey: data.private, // La clave WIF se guarda de forma segura en el backend
+      address: data.address, 
+      privateKey: data.private, 
       createdAt: new Date().toISOString()
-    });
+    }, { merge: true });
 
-    console.log(`[BlockCypher] Dirección creada y guardada: ${data.address}`);
+    console.log(`[BlockCypher] Nueva dirección guardada: ${data.address}`);
 
-    // 4. Devolvemos la dirección real al frontend
     return NextResponse.json({ address: data.address });
 
   } catch (error: any) {
     console.error('🔥 [Error en generate-address]:', error.message);
-    return NextResponse.json({ error: error.message || 'Error interno generando dirección' }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
