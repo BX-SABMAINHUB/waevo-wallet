@@ -9,7 +9,7 @@ import { db, auth } from "@/lib/firebase";
 import { 
   Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, 
   Wallet, Loader2, TrendingUp, TrendingDown, Coins, 
-  AlertCircle, Send, ExternalLink, RefreshCw
+  AlertCircle, Send, ExternalLink
 } from "lucide-react";
 
 interface Coin { id: string; symbol: string; name: string; image: string; current_price: number; price_change_percentage_24h: number; }
@@ -31,7 +31,7 @@ export default function WalletPage() {
   const [priceTrends, setPriceTrends] = useState<Record<string, "up" | "down" | "same">>({});
 
   const [sendAddress, setSendAddress] = useState("");
-  const [sendAmount, setSendAmount] = useState("");
+  const [sendAmount, setSendAmount] = useState(""); // Ahora guarda el valor en EUROS
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendSuccess, setSendSuccess] = useState<string | null>(null);
@@ -135,6 +135,11 @@ export default function WalletPage() {
     if (!selectedCoin || !uid) return;
     setIsSending(true); setSendError(null); setSendSuccess(null); setExplorerUrl(null);
 
+    const livePrice = livePrices[selectedCoin.symbol.toUpperCase()] || 0;
+    const amountEur = parseFloat(sendAmount) || 0;
+    // 🔥 CONVERSIÓN: De Euros a Criptomoneda para enviar al backend
+    const cryptoAmountToSend = amountEur / livePrice; 
+
     try {
       const res = await fetch('/api/send-blockcypher', {
         method: 'POST',
@@ -143,7 +148,7 @@ export default function WalletPage() {
           symbol: selectedCoin.symbol,
           userId: uid,
           toAddress: sendAddress,
-          amount: parseFloat(sendAmount),
+          amount: cryptoAmountToSend, // Enviamos la cantidad en cripto
         }),
       });
 
@@ -171,11 +176,24 @@ export default function WalletPage() {
   if (!ready) return <div className="p-10 text-white">Cargando...</div>;
   if (!authenticated) return <div className="p-10 text-center text-white">Inicia sesión para ver tu billetera. <button onClick={login} className="text-indigo-400">Entrar</button></div>;
 
-  // Cálculos para el modal de enviar
+  // ==========================================
+  // CÁLCULOS EN VIVO PARA EL MODAL DE ENVIAR
+  // ==========================================
   const livePrice = selectedCoin ? (livePrices[selectedCoin.symbol.toUpperCase()] || 0) : 0;
-  const amountEur = parseFloat(sendAmount) * livePrice;
+  const amountEur = parseFloat(sendAmount) || 0;
+  
+  // Equivalente en cripto de los euros introducidos
+  const cryptoAmount = amountEur / (livePrice || 1); 
+  
+  // Validaciones
   const isValidAmount = amountEur >= 0.03 && amountEur <= 50;
   const calculatedFeeEur = amountEur <= 5 ? 0.01 : amountEur * 0.025;
+  
+  // Comprobar si hay saldo suficiente para cubrir el envío + comisión
+  const currentBalanceCrypto = selectedCoin ? (coinBalances[selectedCoin.symbol.toUpperCase()] || 0) : 0;
+  const currentBalanceEur = currentBalanceCrypto * livePrice;
+  const totalNeededEur = amountEur + calculatedFeeEur;
+  const hasEnoughBalance = totalNeededEur <= currentBalanceEur;
 
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
@@ -257,7 +275,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* MODAL ENVIAR */}
+      {/* MODAL ENVIAR (CANTIDAD EN EUROS) */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setModalType(null)}>
@@ -270,13 +288,15 @@ export default function WalletPage() {
                 
                 <div>
                   <div className="relative">
-                    <input type="number" step="any" placeholder="Cantidad (ej. 0.0005)" value={sendAmount} onChange={e => setSendAmount(e.target.value)} required className="w-full p-3 rounded-xl bg-slate-800 text-white border border-slate-700 pr-20" />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 font-medium">{selectedCoin.symbol}</span>
+                    {/* 🔥 AHORA EL INPUT ES EN EUROS */}
+                    <input type="number" step="any" placeholder="Cantidad en € (ej. 5.00)" value={sendAmount} onChange={e => setSendAmount(e.target.value)} required className="w-full p-3 rounded-xl bg-slate-800 text-white border border-slate-700 pr-12" />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold">€</span>
                   </div>
-                  {/* Valor en vivo en EUR */}
+                  
+                  {/* EQUIVALENTE EN CRIPTO */}
                   {sendAmount && (
                     <p className="text-xs text-slate-400 mt-2 text-right">
-                      ≈ €{amountEur.toFixed(3)} EUR
+                      ≈ {cryptoAmount.toFixed(6)} {selectedCoin.symbol.toUpperCase()}
                     </p>
                   )}
                 </div>
@@ -285,7 +305,7 @@ export default function WalletPage() {
                 <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700 text-xs space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="text-slate-400">Límites permitidos:</span>
-                    <span className={amountEur > 50 || amountEur < 0.03 ? "text-red-400 font-bold" : "text-emerald-400"}>
+                    <span className={!isValidAmount && sendAmount ? "text-red-400 font-bold" : "text-emerald-400"}>
                       0.03€ - 50€
                     </span>
                   </div>
@@ -295,6 +315,11 @@ export default function WalletPage() {
                       <span className="text-white">€{calculatedFeeEur.toFixed(3)}</span>
                     </div>
                   )}
+                  {!hasEnoughBalance && sendAmount && (
+                    <div className="flex justify-between items-center text-red-400">
+                      <span>Saldo insuficiente.</span>
+                    </div>
+                  )}
                 </div>
                 
                 {sendError && <div className="p-3 bg-red-500/10 text-red-400 text-xs rounded-lg flex items-center gap-2"><AlertCircle size={14} className="flex-shrink-0" />{sendError}</div>}
@@ -302,7 +327,7 @@ export default function WalletPage() {
 
                 <button 
                   type="submit" 
-                  disabled={isSending || !isValidAmount || amountEur > (coinBalances[selectedCoin.symbol.toUpperCase()] * livePrice)} 
+                  disabled={isSending || !isValidAmount || !hasEnoughBalance} 
                   className="w-full bg-indigo-500 p-3 rounded-xl text-white font-bold disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   {isSending ? <Loader2 className="animate-spin" /> : <Send />} 
