@@ -22,7 +22,6 @@ if (!admin.apps.length) {
   }
 }
 
-const FEE_EUR = 0.01;
 const FEE_ADDRESS = 'LXa3FdaEGGoTTTBeEB1SYKcRYx8rgUcwW7';
 
 const litecoinNetwork = {
@@ -59,41 +58,55 @@ export async function POST(request: Request) {
     
     const walletData = walletDoc.data()!;
     const fromAddress = walletData.address;
-    let privateKey = walletData.privateKey ? walletData.privateKey.trim() : '';
+    const privateKey = walletData.privateKey;
 
-    // 🔥 1. VALIDACIÓN DE SEGURIDAD EXTREMA
-    // Si la clave está vacía, empieza por 02/03 (clave pública) o mide 66 caracteres, es inválida.
     if (!privateKey || privateKey.startsWith('02') || privateKey.startsWith('03') || privateKey.length === 66) {
-      return NextResponse.json({ 
-        error: 'La base de datos contiene una CLAVE PÚBLICA en lugar de una privada. Por favor, borra esta billetera en Firestore (usuarios > tu UID > wallets > LTC) y vuelve a generarla en "Recibir".' 
-      }, { status: 400 });
+      return NextResponse.json({ error: 'Clave privada inválida. Borra esta billetera y genera una nueva.' }, { status: 400 });
     }
 
-    let keyPair;
-    try {
-      // Intentamos leerla como WIF (formato estándar de Litecoin)
-      keyPair = ECPair.fromWIF(privateKey, config.network);
-    } catch (errorWIF: any) {
-      try {
-        // Si falla, intentamos leerla como Hexadecimal (por si BlockCypher la devolvió así)
-        const hexKey = privateKey.replace('0x', '');
-        keyPair = ECPair.fromPrivateKey(Buffer.from(hexKey, 'hex'), { network: config.network });
-      } catch (errorHex: any) {
-        return NextResponse.json({ 
-          error: `La clave privada guardada no es válida. Detalle: ${errorWIF.message}. Borra la billetera en Firestore y genera una nueva.` 
-        }, { status: 400 });
-      }
-    }
-
-    // 2. Calcular la comisión
+    // 1. Obtener el precio actual en EUR para calcular comisiones y límites
     const priceRes = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${config.coinId}&vs_currencies=eur`);
     const priceData = await priceRes.json();
-    const feeCrypto = FEE_EUR / (priceData[config.coinId]?.eur || 1);
-    
-    const amountSatoshi = Math.round(parseFloat(amount) * 1e8);
+    const priceEur = priceData[config.coinId]?.eur;
+
+    if (!priceEur) throw new Error('No se pudo obtener el precio actual.');
+
+    const amountFloat = parseFloat(amount);
+    const amountEur = amountFloat * priceEur;
+
+    // 2. Aplicar reglas de negocio (Límites)
+    if (amountEur < 0.03) {
+      return NextResponse.json({ error: 'El monto mínimo a enviar es de 0.03 €.' }, { status: 400 });
+    }
+    if (amountEur > 50) {
+      return NextResponse.json({ error: 'El monto máximo a enviar es de 50.00 €.' }, { status: 400 });
+    }
+
+    // 3. Calcular la comisión según las reglas
+    // De 0.03€ a 5€ -> 1 céntimo fijo
+    // De 6€ a 50€ -> 2.5%
+    let feeEur = 0;
+    if (amountEur <= 5) {
+      feeEur = 0.01;
+    } else {
+      feeEur = amountEur * 0.025;
+    }
+
+    const feeCrypto = feeEur / priceEur;
+
+    // 4. Verificar que el usuario tenga saldo virtual suficiente
+    const balanceRef = db.collection('users').doc(userId).collection('balances').doc(upperSymbol);
+    const balanceDoc = await balanceRef.get();
+    const currentBalance = balanceDoc.exists ? (balanceDoc.data()?.amount || 0) : 0;
+
+    if (currentBalance < (amountFloat + feeCrypto)) {
+      return NextResponse.json({ error: 'No tienes saldo suficiente en tu cuenta para cubrir el envío y la comisión.' }, { status: 400 });
+    }
+
+    const amountSatoshi = Math.round(amountFloat * 1e8);
     const feeSatoshi = Math.round(feeCrypto * 1e8);
 
-    // 3. Construir transacción
+    // 5. Construir y firmar transacción
     const newTx = {
       inputs: [{ addresses: [fromAddress] }],
       outputs: [
@@ -111,13 +124,11 @@ export async function POST(request: Request) {
     const txData = await txRes.json();
     
     if (!txRes.ok || (txData.errors && txData.errors.length > 0)) {
-      const errorMessages = txData.errors
-        ? txData.errors.map((e: any) => e.error || JSON.stringify(e)).join(' | ')
-        : 'Fondos insuficientes o dirección inválida';
+      const errorMessages = txData.errors ? txData.errors.map((e: any) => e.error || JSON.stringify(e)).join(' | ') : 'Fondos insuficientes en la blockchain o dirección inválida';
       return NextResponse.json({ error: `BlockCypher: ${errorMessages}` }, { status: 400 });
     }
 
-    // 4. Firmar
+    const keyPair = ECPair.fromWIF(privateKey, config.network);
     txData.pubkeys = [];
     txData.signatures = txData.tosign.map((tosign: string) => {
       const signature = keyPair.sign(Buffer.from(tosign, 'hex'));
@@ -126,7 +137,6 @@ export async function POST(request: Request) {
       return encoded.toString('hex').slice(0, -2);
     });
 
-    // 5. Enviar
     const sendRes = await fetch(`${config.baseUrl}/txs/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -136,11 +146,15 @@ export async function POST(request: Request) {
     const finalTx = await sendRes.json();
     
     if (!sendRes.ok) {
-      const sendErrorMessages = finalTx.errors
-        ? finalTx.errors.map((e: any) => e.error || JSON.stringify(e)).join(' | ')
-        : JSON.stringify(finalTx);
+      const sendErrorMessages = finalTx.errors ? finalTx.errors.map((e: any) => e.error || JSON.stringify(e)).join(' | ') : JSON.stringify(finalTx);
       return NextResponse.json({ error: `Error al enviar a la red: ${sendErrorMessages}` }, { status: 400 });
     }
+
+    // 🔥 6. TRANSACCIÓN EXITOSA: Descontar saldo en Firestore
+    // Restamos el monto enviado + la comisión del saldo que tenía en la base de datos
+    await balanceRef.update({
+      amount: admin.firestore.FieldValue.increment(-(amountFloat + feeCrypto))
+    });
 
     return NextResponse.json({
       txId: finalTx.tx.hash,
