@@ -5,6 +5,10 @@ import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
 import crypto from 'crypto';
 
+// 🔥 CRÍTICO: Forzar Runtime de Node.js para evitar errores con crypto y WebAssembly
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
 
@@ -24,6 +28,7 @@ if (!admin.apps.length) {
   }
 }
 
+// Configuración de redes para BlockCypher
 const litecoinNetwork = {
   messagePrefix: '\x19Litecoin Signed Message:\n',
   bech32: 'ltc',
@@ -41,6 +46,7 @@ const NETWORKS: Record<string, { blockcypher: string; network: any }> = {
 const FIXEDFLOAT_API_KEY = process.env.FIXEDFLOAT_API_KEY;
 const FIXEDFLOAT_API_SECRET = process.env.FIXEDFLOAT_API_SECRET;
 
+// Función para firmar las peticiones (HMAC-SHA256)
 function signFixedFloat(data: string): string {
   return crypto.createHmac('sha256', FIXEDFLOAT_API_SECRET!).update(data).digest('hex');
 }
@@ -61,7 +67,6 @@ async function fixedFloatRequest(method: string, params: any) {
 
   const json = await res.json();
   if (json.code !== 0) {
-    // 🔥 LOG DETALLADO: Imprimimos el error exacto que devuelve FixedFloat
     console.error(`[FixedFloat Error] Código: ${json.code}, Mensaje: ${json.msg || 'Sin mensaje'}`);
     throw new Error(`FixedFloat: ${json.msg || 'Error en la petición'}`);
   }
@@ -103,7 +108,7 @@ export async function POST(request: Request) {
       console.log(`[Swap] Billetera ${upperTo} creada: ${toAddress}`);
     }
 
-    // 3. Verificar límites de FixedFloat antes de crear la orden
+    // 3. Verificar límites de FixedFloat
     console.log(`[FixedFloat] Obteniendo límites para ${upperFrom} -> ${upperTo}...`);
     const limits = await fixedFloatRequest('getLimits', {
       fromCcy: upperFrom,
@@ -116,7 +121,7 @@ export async function POST(request: Request) {
     const maxAmount = parseFloat(limits.from.max);
     const requestedAmount = parseFloat(amount);
 
-    console.log(`[FixedFloat] Límites: Min ${minAmount} ${upperFrom}, Max ${maxAmount} ${upperFrom}. Solicitado: ${requestedAmount} ${upperFrom}`);
+    console.log(`[FixedFloat] Límites: Min ${minAmount}, Max ${maxAmount}. Solicitado: ${requestedAmount}`);
 
     if (requestedAmount < minAmount) {
       return NextResponse.json({ error: `La cantidad mínima para este par es ${minAmount} ${upperFrom}.` }, { status: 400 });
@@ -125,7 +130,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `La cantidad máxima para este par es ${maxAmount} ${upperFrom}.` }, { status: 400 });
     }
 
-    // 4. Crear la orden en FixedFloat
+    // 4. Crear orden en FixedFloat
     const orderParams = {
       fromCcy: upperFrom,
       toCcy: upperTo,
@@ -135,7 +140,7 @@ export async function POST(request: Request) {
       toAddress: toAddress,
     };
 
-    console.log(`[FixedFloat] Creando orden: ${JSON.stringify(orderParams)}`);
+    console.log(`[FixedFloat] Creando orden...`);
     const orderData = await fixedFloatRequest('create', orderParams);
 
     const depositAddress = orderData.from.address;
@@ -144,7 +149,7 @@ export async function POST(request: Request) {
 
     console.log(`[FixedFloat] Orden ${orderId} creada. Depositar en: ${depositAddress}`);
 
-    // 5. Enviar fondos desde la billetera de origen a la dirección de depósito
+    // 5. Enviar fondos a FixedFloat
     const privateKey = fromWallet.privateKey;
     if (!privateKey) return NextResponse.json({ error: 'Clave privada de origen no válida' }, { status: 400 });
 
@@ -198,7 +203,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `Error al enviar a FixedFloat: ${JSON.stringify(finalTx.errors)}` }, { status: 400 });
     }
 
-    // 6. Actualizar saldos en Firebase (restar origen, sumar destino)
+    // 6. Actualizar saldos en Firebase
     const fromBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperFrom);
     const toBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperTo);
 
