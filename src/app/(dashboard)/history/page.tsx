@@ -4,7 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { motion, AnimatePresence } from "@/components/motion-client";
 import { auth, db } from "@/lib/firebase";
-import { doc, getDoc, setDoc, increment } from "firebase/firestore";
+// 🔥 Añadimos onSnapshot y runTransaction
+import { doc, getDoc, setDoc, increment, onSnapshot, runTransaction } from "firebase/firestore";
 import { 
   RefreshCw, CheckCircle2, Clock, Wallet, Loader2, 
   AlertCircle, Search, ChevronDown, ExternalLink, 
@@ -59,21 +60,20 @@ export default function HistoryPage() {
     fetchCoins();
   }, []);
 
-  // Cargar transacciones ya reclamadas
+  // 🔥 ESCUCHAR TRANSACCIONES RECLAMADAS EN TIEMPO REAL (Evita el bug multi-dispositivo)
   useEffect(() => {
     if (!uid) return;
-    async function fetchClaimed() {
-      try {
-        const docRef = doc(db, "users", uid, "claimed_transactions", "history");
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          setClaimedTxs(docSnap.data().hashes || []);
-        }
-      } catch (error) {
-        console.error("Error cargando reclamados:", error);
+    const claimedRef = doc(db, "users", uid, "claimed_transactions", "history");
+    
+    const unsubscribe = onSnapshot(claimedRef, (docSnap) => {
+      if (docSnap.exists()) {
+        setClaimedTxs(docSnap.data().hashes || []);
+      } else {
+        setClaimedTxs([]);
       }
-    }
-    fetchClaimed();
+    });
+
+    return () => unsubscribe();
   }, [uid]);
 
   useEffect(() => {
@@ -142,30 +142,40 @@ export default function HistoryPage() {
     setTimeout(() => setCopiedHash(false), 2000);
   };
 
-  // Lógica para reclamar el dinero
+  // 🔥 LÓGICA DE RECLAMAR BLINDADA CON TRANSACCIÓN ATÓMICA
   const handleClaim = async () => {
     if (!uid || !selectedTx || !selectedCoin) return;
     setIsClaiming(true);
 
     try {
-      // 1. Sumar el saldo a la billetera en Firestore
-      const balanceRef = doc(db, "users", uid, "balances", selectedCoin.symbol.toUpperCase());
-      await setDoc(balanceRef, {
-        amount: increment(parseFloat(selectedTx.amount))
-      }, { merge: true });
-
-      // 2. Guardar el hash como reclamado para que no se pueda volver a reclamar
       const claimedRef = doc(db, "users", uid, "claimed_transactions", "history");
-      const newClaimedList = [...claimedTxs, selectedTx.hash];
-      await setDoc(claimedRef, { hashes: newClaimedList }, { merge: true });
-      
-      setClaimedTxs(newClaimedList);
-      
+      const balanceRef = doc(db, "users", uid, "balances", selectedCoin.symbol.toUpperCase());
+
+      // Ejecutamos una transacción en Firebase (O se hace todo, o no se hace nada)
+      await runTransaction(db, async (transaction) => {
+        // 1. Leer estado actual de los hashes reclamados
+        const claimedDoc = await transaction.get(claimedRef);
+        const currentHashes = claimedDoc.exists() ? claimedDoc.data().hashes || [] : [];
+
+        // 2. Si el hash ya está ahí, abortamos para evitar doble multiplicación
+        if (currentHashes.includes(selectedTx.hash)) {
+          throw new Error("Esta transacción ya ha sido reclamada.");
+        }
+
+        // 3. Leer el saldo actual
+        const balanceDoc = await transaction.get(balanceRef);
+        const currentBalance = balanceDoc.exists() ? balanceDoc.data().amount || 0 : 0;
+
+        // 4. Guardar el nuevo hash y sumar el saldo en la misma operación atómica
+        transaction.set(claimedRef, { hashes: [...currentHashes, selectedTx.hash] }, { merge: true });
+        transaction.set(balanceRef, { amount: currentBalance + parseFloat(selectedTx.amount) }, { merge: true });
+      });
+
       alert(`✅ ¡Has reclamado ${selectedTx.amount} ${selectedTx.symbol}! Ya está disponible en Tu Billetera.`);
       setIsTxModalOpen(false);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error reclamando:", error);
-      alert("❌ Error al reclamar el dinero. Inténtalo de nuevo.");
+      alert(`❌ ${error.message || "Error al reclamar el dinero. Inténtalo de nuevo."}`);
     } finally {
       setIsClaiming(false);
     }
@@ -333,7 +343,7 @@ export default function HistoryPage() {
                 </div>
               </div>
 
-              {/* BOTÓN DE RECLAMAR */}
+              {/* BOTÓN DE RECLAMAR BLINDADO */}
               {selectedTx.status === 'confirmed' && (
                 <div className="mt-6">
                   {isCurrentTxClaimed ? (
