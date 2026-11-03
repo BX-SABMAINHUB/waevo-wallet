@@ -11,7 +11,6 @@ export const dynamic = 'force-dynamic';
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
 
-// Inicialización de Firebase Admin
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
@@ -27,7 +26,6 @@ if (!admin.apps.length) {
   }
 }
 
-// Configuración de redes para BlockCypher
 const litecoinNetwork = {
   messagePrefix: '\x19Litecoin Signed Message:\n',
   bech32: 'ltc',
@@ -49,7 +47,6 @@ function signFixedFloat(data: string): string {
   return crypto.createHmac('sha256', FIXEDFLOAT_API_SECRET!).update(data).digest('hex');
 }
 
-// 🔥 FUNCIÓN DE PETICIÓN BLINDADA
 async function fixedFloatRequest(method: string, params: any) {
   const data = JSON.stringify(params);
   const signature = signFixedFloat(data);
@@ -71,6 +68,12 @@ async function fixedFloatRequest(method: string, params: any) {
     const json = JSON.parse(text);
     if (json.code !== 0) {
       console.error(`[FixedFloat Error] Código: ${json.code}, Mensaje: ${json.msg || 'Sin mensaje'}`);
+      
+      // 🔥 MANEJO ESPECÍFICO PARA ERROR 300
+      if (json.code === 300 || json.msg === 'Internal error') {
+        throw new Error('El intercambio no está disponible en tu región en este momento. Por favor, inténtalo más tarde o contacta con soporte.');
+      }
+      
       throw new Error(`FixedFloat: ${json.msg || 'Error en la petición'}`);
     }
     return json.data;
@@ -93,7 +96,6 @@ export async function POST(request: Request) {
 
     const db = admin.firestore();
     
-    // 1. Obtener billetera de origen
     const fromWalletRef = db.collection('users').doc(userId).collection('wallets').doc(upperFrom);
     const fromWalletDoc = await fromWalletRef.get();
     if (!fromWalletDoc.exists) {
@@ -101,7 +103,6 @@ export async function POST(request: Request) {
     }
     const fromWallet = fromWalletDoc.data()!;
 
-    // 2. Verificar/Generar billetera de destino
     const toWalletRef = db.collection('users').doc(userId).collection('wallets').doc(upperTo);
     let toWalletDoc = await toWalletRef.get();
     let toAddress = toWalletDoc.exists ? toWalletDoc.data()?.address : null;
@@ -115,7 +116,6 @@ export async function POST(request: Request) {
       console.log(`[Swap] Billetera ${upperTo} creada: ${toAddress}`);
     }
 
-    // 3. Crear orden directamente (sin getLimits)
     const orderParams = {
       fromCcy: upperFrom,
       toCcy: upperTo,
@@ -134,7 +134,6 @@ export async function POST(request: Request) {
 
     console.log(`[FixedFloat] Orden ${orderId} creada. Depositar en: ${depositAddress}`);
 
-    // 4. Enviar fondos a FixedFloat
     const privateKey = fromWallet.privateKey;
     if (!privateKey) return NextResponse.json({ error: 'Clave privada de origen no válida' }, { status: 400 });
 
@@ -188,7 +187,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `Error al enviar a FixedFloat: ${JSON.stringify(finalTx.errors)}` }, { status: 400 });
     }
 
-    // 5. Actualizar saldos
     const fromBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperFrom);
     const toBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperTo);
 
