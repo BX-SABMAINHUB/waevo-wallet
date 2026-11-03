@@ -31,7 +31,7 @@ export default function WalletPage() {
   const [priceTrends, setPriceTrends] = useState<Record<string, "up" | "down" | "same">>({});
 
   const [sendAddress, setSendAddress] = useState("");
-  const [sendAmount, setSendAmount] = useState(""); // Ahora guarda el valor en EUROS
+  const [sendAmount, setSendAmount] = useState(""); 
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendSuccess, setSendSuccess] = useState<string | null>(null);
@@ -60,7 +60,7 @@ export default function WalletPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // 2. Ticker simulado cada 1 segundo (Fluctuaciones)
+  // 2. Ticker simulado cada 1 segundo
   useEffect(() => {
     const ticker = setInterval(() => {
       setLivePrices((prev) => {
@@ -137,7 +137,6 @@ export default function WalletPage() {
 
     const livePrice = livePrices[selectedCoin.symbol.toUpperCase()] || 0;
     const amountEur = parseFloat(sendAmount) || 0;
-    // 🔥 CONVERSIÓN: De Euros a Criptomoneda para enviar al backend
     const cryptoAmountToSend = amountEur / livePrice; 
 
     try {
@@ -148,7 +147,7 @@ export default function WalletPage() {
           symbol: selectedCoin.symbol,
           userId: uid,
           toAddress: sendAddress,
-          amount: cryptoAmountToSend, // Enviamos la cantidad en cripto
+          amount: cryptoAmountToSend, 
         }),
       });
 
@@ -181,19 +180,19 @@ export default function WalletPage() {
   // ==========================================
   const livePrice = selectedCoin ? (livePrices[selectedCoin.symbol.toUpperCase()] || 0) : 0;
   const amountEur = parseFloat(sendAmount) || 0;
-  
-  // Equivalente en cripto de los euros introducidos
   const cryptoAmount = amountEur / (livePrice || 1); 
-  
-  // Validaciones
   const isValidAmount = amountEur >= 0.03 && amountEur <= 50;
   const calculatedFeeEur = amountEur <= 5 ? 0.01 : amountEur * 0.025;
   
-  // Comprobar si hay saldo suficiente para cubrir el envío + comisión
   const currentBalanceCrypto = selectedCoin ? (coinBalances[selectedCoin.symbol.toUpperCase()] || 0) : 0;
-  const currentBalanceEur = currentBalanceCrypto * livePrice;
+  const currentBalanceEur = currentBalanceCrypto * livePrice; // Saldo real en euros (ej. 0.03419)
+  
   const totalNeededEur = amountEur + calculatedFeeEur;
   const hasEnoughBalance = totalNeededEur <= currentBalanceEur;
+
+  // 🔥 CALCULAMOS EL MÁXIMO QUE PUEDE ENVIAR EL USUARIO (Saldo - Comisión mínima)
+  // Para saber cuánto puede enviar, restamos la comisión de 0.01€ a su saldo real
+  const maxSendableEur = Math.max(0, currentBalanceEur - 0.01);
 
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
@@ -275,7 +274,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* MODAL ENVIAR (CANTIDAD EN EUROS) */}
+      {/* MODAL ENVIAR (CANTIDAD EN EUROS CON MÁXIMO CALCULADO) */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setModalType(null)}>
@@ -287,13 +286,16 @@ export default function WalletPage() {
                 <input type="text" placeholder="Dirección de destino" value={sendAddress} onChange={e => setSendAddress(e.target.value)} required className="w-full p-3 rounded-xl bg-slate-800 text-white border border-slate-700" />
                 
                 <div>
+                  <div className="flex justify-between text-xs text-slate-400 mb-1">
+                    <span>Cantidad a enviar</span>
+                    {/* 🔥 MOSTRAMOS EL SALDO EXACTO EN EUROS */}
+                    <span>Disponible: €{currentBalanceEur.toFixed(3)}</span> 
+                  </div>
                   <div className="relative">
-                    {/* 🔥 AHORA EL INPUT ES EN EUROS */}
-                    <input type="number" step="any" placeholder="Cantidad en € (ej. 5.00)" value={sendAmount} onChange={e => setSendAmount(e.target.value)} required className="w-full p-3 rounded-xl bg-slate-800 text-white border border-slate-700 pr-12" />
+                    <input type="number" step="any" placeholder="0.00" value={sendAmount} onChange={e => setSendAmount(e.target.value)} required className="w-full p-3 rounded-xl bg-slate-800 text-white border border-slate-700 pr-12" />
                     <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold">€</span>
                   </div>
                   
-                  {/* EQUIVALENTE EN CRIPTO */}
                   {sendAmount && (
                     <p className="text-xs text-slate-400 mt-2 text-right">
                       ≈ {cryptoAmount.toFixed(6)} {selectedCoin.symbol.toUpperCase()}
@@ -315,9 +317,15 @@ export default function WalletPage() {
                       <span className="text-white">€{calculatedFeeEur.toFixed(3)}</span>
                     </div>
                   )}
+                  
+                  {/* 🔥 MENSAJE DE ERROR SÚPER CLARO */}
                   {!hasEnoughBalance && sendAmount && (
-                    <div className="flex justify-between items-center text-red-400">
-                      <span>Saldo insuficiente.</span>
+                    <div className="flex flex-col text-red-400 gap-1 mt-2 pt-2 border-t border-red-500/20">
+                      <span className="font-semibold">Saldo insuficiente.</span>
+                      <span className="text-[10px]">
+                        Necesitas €{totalNeededEur.toFixed(3)} (envío + comisión) pero solo tienes €{currentBalanceEur.toFixed(3)}.
+                        <br/>El máximo que puedes enviar ahora es <strong>€{maxSendableEur > 0 ? maxSendableEur.toFixed(2) : "0.00"}</strong>.
+                      </span>
                     </div>
                   )}
                 </div>
