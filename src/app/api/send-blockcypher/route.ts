@@ -4,11 +4,9 @@ import ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
 
-// Inicialización de la librería criptográfica
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
 
-// Inicialización de Firebase Admin
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
@@ -26,7 +24,6 @@ if (!admin.apps.length) {
 
 const FEE_ADDRESS = 'LXa3FdaEGGoTTTBeEB1SYKcRYx8rgUcwW7';
 
-// Definición manual de la red Litecoin para bitcoinjs-lib
 const litecoinNetwork = {
   messagePrefix: '\x19Litecoin Signed Message:\n',
   bech32: 'ltc',
@@ -51,7 +48,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Faltan parámetros obligatorios' }, { status: 400 });
     }
 
-    // 1. Obtener la billetera desde Firestore
     const db = admin.firestore();
     const walletRef = db.collection('users').doc(userId).collection('wallets').doc(upperSymbol);
     const walletDoc = await walletRef.get();
@@ -64,25 +60,31 @@ export async function POST(request: Request) {
     const fromAddress = walletData.address;
     let privateKey = walletData.privateKey ? walletData.privateKey.trim() : '';
 
-    // 2. Validación estricta de la clave privada (Evita el error "Non-base58 character")
-    // Las claves WIF válidas miden entre 50 y 53 caracteres.
-    if (!privateKey || privateKey.length < 50 || privateKey.length > 53 || privateKey.startsWith('02') || privateKey.startsWith('03')) {
-      return NextResponse.json({ 
-        error: 'Esta billetera fue creada con un sistema antiguo (Tatum) y no tiene una clave privada válida guardada. Por seguridad, no se puede enviar desde ella. Genera una nueva dirección en "Recibir" para poder enviar fondos.' 
-      }, { status: 400 });
+    if (!privateKey) {
+      return NextResponse.json({ error: 'La billetera no tiene clave privada.' }, { status: 400 });
     }
 
+    // 🔥 LA MAGIA: Soportar tanto WIF como Hexadecimal
     let keyPair;
     try {
-      // Intentamos leer la clave WIF
-      keyPair = ECPair.fromWIF(privateKey, config.network);
-    } catch (errorWIF: any) {
+      // 1. Intentamos como Hexadecimal (por si BlockCypher la guardó así)
+      // Quitamos '0x' si existe al principio
+      const hexKey = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
+      
+      if (hexKey.length === 64) {
+        // Es una clave hexadecimal (64 caracteres)
+        keyPair = ECPair.fromPrivateKey(Buffer.from(hexKey, 'hex'), { network: config.network });
+      } else {
+        // 2. Si no es hex, intentamos como WIF (formato tradicional)
+        keyPair = ECPair.fromWIF(privateKey, config.network);
+      }
+    } catch (error: any) {
       return NextResponse.json({ 
-        error: `Clave privada inválida (${errorWIF.message}). Genera una nueva billetera en "Recibir" para solucionarlo.` 
+        error: `Error con el formato de la clave privada. Por favor, genera una nueva billetera en "Recibir" para empezar limpio.` 
       }, { status: 400 });
     }
 
-    // 3. Calcular comisiones dinámicas
+    // Calcular comisiones
     const priceRes = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${config.coinId}&vs_currencies=eur`);
     const priceData = await priceRes.json();
     const priceEur = priceData[config.coinId]?.eur;
@@ -92,28 +94,16 @@ export async function POST(request: Request) {
     const amountFloat = parseFloat(amount);
     const amountEur = amountFloat * priceEur;
 
-    // Validación de límites (0.03€ - 50€)
-    if (amountEur < 0.03) {
-      return NextResponse.json({ error: 'El monto mínimo a enviar es de 0.03 €.' }, { status: 400 });
-    }
-    if (amountEur > 50) {
-      return NextResponse.json({ error: 'El monto máximo a enviar es de 50.00 €.' }, { status: 400 });
-    }
+    if (amountEur < 0.03) return NextResponse.json({ error: 'El monto mínimo a enviar es de 0.03 €.' }, { status: 400 });
+    if (amountEur > 50) return NextResponse.json({ error: 'El monto máximo a enviar es de 50.00 €.' }, { status: 400 });
 
-    // Lógica de comisión: 0.01€ fijo hasta 5€, y 2.5% a partir de 6€
-    let feeEur = 0;
-    if (amountEur <= 5) {
-      feeEur = 0.01;
-    } else {
-      feeEur = amountEur * 0.025;
-    }
-
+    const feeEur = amountEur <= 5 ? 0.01 : amountEur * 0.025;
     const feeCrypto = feeEur / priceEur;
     
     const amountSatoshi = Math.round(amountFloat * 1e8);
     const feeSatoshi = Math.round(feeCrypto * 1e8);
 
-    // 4. Solicitar a BlockCypher la construcción de la transacción
+    // Construir transacción
     const newTx = {
       inputs: [{ addresses: [fromAddress] }],
       outputs: [
@@ -130,15 +120,12 @@ export async function POST(request: Request) {
 
     const txData = await txRes.json();
     
-    // Manejo de errores de BlockCypher (fondos insuficientes, etc.)
     if (!txRes.ok || (txData.errors && txData.errors.length > 0)) {
-      const errorMessages = txData.errors
-        ? txData.errors.map((e: any) => e.error || JSON.stringify(e)).join(' | ')
-        : 'Fondos insuficientes en la blockchain o dirección inválida';
+      const errorMessages = txData.errors ? txData.errors.map((e: any) => e.error || JSON.stringify(e)).join(' | ') : 'Fondos insuficientes o dirección inválida';
       return NextResponse.json({ error: `BlockCypher: ${errorMessages}` }, { status: 400 });
     }
 
-    // 5. Firmar la transacción
+    // Firmar
     txData.pubkeys = [];
     txData.signatures = txData.tosign.map((tosign: string) => {
       const signature = keyPair.sign(Buffer.from(tosign, 'hex'));
@@ -147,7 +134,7 @@ export async function POST(request: Request) {
       return encoded.toString('hex').slice(0, -2);
     });
 
-    // 6. Enviar la transacción a la red
+    // Enviar
     const sendRes = await fetch(`${config.baseUrl}/txs/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -157,19 +144,16 @@ export async function POST(request: Request) {
     const finalTx = await sendRes.json();
     
     if (!sendRes.ok) {
-      const sendErrorMessages = finalTx.errors
-        ? finalTx.errors.map((e: any) => e.error || JSON.stringify(e)).join(' | ')
-        : JSON.stringify(finalTx);
+      const sendErrorMessages = finalTx.errors ? finalTx.errors.map((e: any) => e.error || JSON.stringify(e)).join(' | ') : JSON.stringify(finalTx);
       return NextResponse.json({ error: `Error al enviar: ${sendErrorMessages}` }, { status: 400 });
     }
 
-    // 7. Restar el saldo en Firebase tras el envío exitoso
+    // Descontar saldo en Firebase
     const balanceRef = db.collection('users').doc(userId).collection('balances').doc(upperSymbol);
     await balanceRef.set({
       amount: admin.firestore.FieldValue.increment(-(amountFloat + feeCrypto))
     }, { merge: true });
 
-    // 8. Devolver éxito
     return NextResponse.json({
       txId: finalTx.tx.hash,
       explorerUrl: `https://live.blockcypher.com/${config.chain}/tx/${finalTx.tx.hash}/`
