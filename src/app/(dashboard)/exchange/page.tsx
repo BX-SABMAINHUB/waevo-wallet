@@ -32,42 +32,35 @@ export default function ExchangePage() {
 
   const uid = auth.currentUser?.uid || "";
 
-  // 1. Cargar precios de CoinGecko
+  // 1. Cargar precios
   useEffect(() => {
     async function fetchCoins() {
       try {
         const res = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=eur&order=market_cap_desc&per_page=250&page=1&sparkline=false");
         const data = await res.json();
         setCoins(data);
-        
         const prices: Record<string, number> = {};
         data.forEach((c: Coin) => { prices[c.symbol.toUpperCase()] = c.current_price; });
         setLivePrices(prices);
-      } catch (error) { 
-        console.error("Error fetching coins:", error); 
-      }
+      } catch (error) { console.error("Error fetching coins:", error); }
     }
     fetchCoins();
-    
-    // Actualizar precios cada 60 segundos
     const interval = setInterval(fetchCoins, 60000);
     return () => clearInterval(interval);
   }, []);
 
-  // 2. Escuchar saldos en tiempo real desde Firestore
+  // 2. Escuchar saldos
   useEffect(() => {
     if (!uid) return;
     const unsubscribe = onSnapshot(collection(db, "users", uid, "balances"), (snapshot) => {
       const balances: Record<string, number> = {};
-      snapshot.forEach((doc) => { 
-        if (doc.data().amount) balances[doc.id] = doc.data().amount; 
-      });
+      snapshot.forEach((doc) => { if (doc.data().amount) balances[doc.id] = doc.data().amount; });
       setCoinBalances(balances);
     });
     return () => unsubscribe();
   }, [uid]);
 
-  // 3. Filtrar monedas que tienen al menos 0.05€ de saldo
+  // 3. Filtrar monedas de origen (mínimo 0.05€)
   const availableFromCoins = useMemo(() => {
     return coins.filter(coin => {
       const balance = coinBalances[coin.symbol.toUpperCase()] || 0;
@@ -76,28 +69,26 @@ export default function ExchangePage() {
     });
   }, [coins, coinBalances, livePrices]);
 
-  // 4. Cálculos en tiempo real
+  // 4. Cálculos en vivo
   const fromPrice = fromCoin ? (livePrices[fromCoin.symbol.toUpperCase()] || 0) : 0;
   const toPrice = toCoin ? (livePrices[toCoin.symbol.toUpperCase()] || 0) : 0;
   const parsedAmount = parseFloat(amount) || 0;
   const estimatedReceive = toPrice > 0 ? (parsedAmount * fromPrice) / toPrice : 0;
   const currentBalance = fromCoin ? (coinBalances[fromCoin.symbol.toUpperCase()] || 0) : 0;
   
-  // Margen de error para evitar problemas de coma flotante
   const hasEnoughBalance = parsedAmount > 0 && parsedAmount <= (currentBalance + 0.00000001);
 
-  // 5. Autorellenar cantidad al seleccionar moneda
+  // 5. Autorellenar cantidad
   const handleSelectFromCoin = (coinId: string) => {
     const selected = coins.find(c => c.id === coinId) || null;
     setFromCoin(selected);
-    
     if (selected) {
       const balance = coinBalances[selected.symbol.toUpperCase()] || 0;
-      setAmount(balance.toString()); // 🔥 Autocompletamos con el saldo máximo
+      setAmount(balance.toString());
     }
   };
 
-  // 6. Procesar el intercambio
+  // 6. Procesar intercambio
   const handleExchange = async () => {
     if (!uid || !fromCoin || !toCoin || parsedAmount <= 0) return;
     setIsExchanging(true);
@@ -115,6 +106,14 @@ export default function ExchangePage() {
           amount: parsedAmount,
         }),
       });
+
+      // 🔥 VALIDACIÓN: Evitar el error "Unexpected token '<'"
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await res.text();
+        console.error('Respuesta no JSON del servidor:', text.substring(0, 200));
+        throw new Error('El servidor devolvió una respuesta inesperada. Revisa los logs de Vercel.');
+      }
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Error al intercambiar');
@@ -216,9 +215,7 @@ export default function ExchangePage() {
                 className="w-full appearance-none bg-slate-800 border border-slate-700 rounded-xl p-4 pl-12 text-white outline-none focus:border-indigo-500 cursor-pointer"
               >
                 <option value="" disabled>Selecciona una moneda de destino...</option>
-                {coins.map(c => (
-                  <option key={c.id} value={c.id}>{c.symbol.toUpperCase()} - {c.name}</option>
-                ))}
+                {coins.map(c => <option key={c.id} value={c.id}>{c.symbol.toUpperCase()} - {c.name}</option>)}
               </select>
               {toCoin ? (
                 <img src={toCoin.image} className="absolute left-4 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full" />
@@ -260,7 +257,7 @@ export default function ExchangePage() {
             <Info size={14} className="mt-0.5 flex-shrink-0" />
             <p className="text-center">
               Los intercambios son procesados de forma segura por{" "}
-              <a href="waevoX" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">
+              <a href="https://ff.io" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">
                 FixedFloat
               </a>.
             </p>
