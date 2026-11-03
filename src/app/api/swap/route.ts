@@ -5,7 +5,6 @@ import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
 import crypto from 'crypto';
 
-// 🔥 CRÍTICO: Forzar Runtime de Node.js
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
@@ -50,7 +49,7 @@ function signFixedFloat(data: string): string {
   return crypto.createHmac('sha256', FIXEDFLOAT_API_SECRET!).update(data).digest('hex');
 }
 
-// 🔥 FUNCIÓN BLINDADA CONTRA ERRORES HTML
+// 🔥 FUNCIÓN DE PETICIÓN BLINDADA
 async function fixedFloatRequest(method: string, params: any) {
   const data = JSON.stringify(params);
   const signature = signFixedFloat(data);
@@ -61,25 +60,21 @@ async function fixedFloatRequest(method: string, params: any) {
       'Content-Type': 'application/json; charset=UTF-8',
       'X-API-KEY': FIXEDFLOAT_API_KEY!,
       'X-API-SIGN': signature,
-      // Añadimos User-Agent para evitar bloqueos de seguridad de FixedFloat
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     },
     body: data,
   });
 
-  // Leemos la respuesta como texto para evitar el crash si es HTML
   const text = await res.text();
 
   try {
     const json = JSON.parse(text);
-    
     if (json.code !== 0) {
       console.error(`[FixedFloat Error] Código: ${json.code}, Mensaje: ${json.msg || 'Sin mensaje'}`);
       throw new Error(`FixedFloat: ${json.msg || 'Error en la petición'}`);
     }
     return json.data;
   } catch (error) {
-    // Si falla el JSON.parse, mostramos el HTML real que devolvió
     console.error(`[FixedFloat Crash] Status: ${res.status}. Respuesta recibida:`, text.substring(0, 300));
     throw new Error(`FixedFloat devolvió un error inesperado (Status ${res.status}). Revisa los logs.`);
   }
@@ -120,33 +115,11 @@ export async function POST(request: Request) {
       console.log(`[Swap] Billetera ${upperTo} creada: ${toAddress}`);
     }
 
-    // 3. Verificar límites
-    console.log(`[FixedFloat] Obteniendo límites para ${upperFrom} -> ${upperTo}...`);
-    const limits = await fixedFloatRequest('getLimits', {
-      fromCcy: upperFrom,
-      toCcy: upperTo,
-      direction: 'from',
-      type: 'float'
-    });
-
-    const minAmount = parseFloat(limits.from.min);
-    const maxAmount = parseFloat(limits.from.max);
-    const requestedAmount = parseFloat(amount);
-
-    console.log(`[FixedFloat] Límites: Min ${minAmount}, Max ${maxAmount}. Solicitado: ${requestedAmount}`);
-
-    if (requestedAmount < minAmount) {
-      return NextResponse.json({ error: `La cantidad mínima para este par es ${minAmount} ${upperFrom}.` }, { status: 400 });
-    }
-    if (requestedAmount > maxAmount) {
-      return NextResponse.json({ error: `La cantidad máxima para este par es ${maxAmount} ${upperFrom}.` }, { status: 400 });
-    }
-
-    // 4. Crear orden
+    // 3. Crear orden directamente (sin getLimits)
     const orderParams = {
       fromCcy: upperFrom,
       toCcy: upperTo,
-      amount: requestedAmount,
+      amount: parseFloat(amount),
       direction: 'from',
       type: 'float',
       toAddress: toAddress,
@@ -161,7 +134,7 @@ export async function POST(request: Request) {
 
     console.log(`[FixedFloat] Orden ${orderId} creada. Depositar en: ${depositAddress}`);
 
-    // 5. Enviar fondos
+    // 4. Enviar fondos a FixedFloat
     const privateKey = fromWallet.privateKey;
     if (!privateKey) return NextResponse.json({ error: 'Clave privada de origen no válida' }, { status: 400 });
 
@@ -177,7 +150,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Error leyendo clave privada. Genera una nueva billetera.' }, { status: 400 });
     }
 
-    const amountSatoshi = Math.round(requestedAmount * 1e8);
+    const amountSatoshi = Math.round(parseFloat(amount) * 1e8);
 
     const newTx = {
       inputs: [{ addresses: [fromWallet.address] }],
@@ -215,25 +188,25 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `Error al enviar a FixedFloat: ${JSON.stringify(finalTx.errors)}` }, { status: 400 });
     }
 
-    // 6. Actualizar saldos
+    // 5. Actualizar saldos
     const fromBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperFrom);
     const toBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperTo);
 
     await db.runTransaction(async (t) => {
       const fromDoc = await t.get(fromBalanceRef);
       const currentFrom = fromDoc.exists ? fromDoc.data()?.amount || 0 : 0;
-      if (currentFrom < requestedAmount) throw new Error('Saldo insuficiente');
+      if (currentFrom < parseFloat(amount)) throw new Error('Saldo insuficiente');
 
       const toDoc = await t.get(toBalanceRef);
       const currentTo = toDoc.exists ? toDoc.data()?.amount || 0 : 0;
 
-      t.set(fromBalanceRef, { amount: currentFrom - requestedAmount }, { merge: true });
+      t.set(fromBalanceRef, { amount: currentFrom - parseFloat(amount) }, { merge: true });
       t.set(toBalanceRef, { amount: currentTo + parseFloat(expectedReceive) }, { merge: true });
     });
 
     return NextResponse.json({
       success: true,
-      message: `Intercambio en proceso. Enviaste ${requestedAmount} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
+      message: `Intercambio en proceso. Enviaste ${amount} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
       txHash: finalTx.tx.hash,
       orderId,
     });
