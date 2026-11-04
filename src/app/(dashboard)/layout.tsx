@@ -3,19 +3,26 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Compass, Wallet, History, Settings, ArrowRightLeft } from "lucide-react";
+import { 
+  LayoutDashboard, 
+  Compass, 
+  Wallet, 
+  ArrowRightLeft, 
+  Settings 
+} from "lucide-react";
 
+// Cargamos Privy SOLO en el cliente para evitar errores de SSR (createContext)
 const PrivyWrapper = dynamic(
   () => import("@/lib/privy").then((mod) => mod.PrivyWrapper),
   { ssr: false }
 );
 
+// Menú de navegación lateral (Actualizado sin "Ingresos y Historial")
 const NAV_ITEMS = [
   { name: "Overview", href: "/overview", icon: LayoutDashboard },
   { name: "Explorar", href: "/explore", icon: Compass },
   { name: "Tu Billetera", href: "/wallet", icon: Wallet },
-  { name: "Exchange y Cambios", href: "/exchange", icon: ArrowRightLeft }, // 🔥 NUEVO
-  { name: "Ingresos y Historial", href: "/history", icon: History },
+  { name: "Exchange y Cambios", href: "/exchange", icon: ArrowRightLeft },
   { name: "Ajustes", href: "/settings", icon: Settings },
 ];
 
@@ -25,6 +32,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <PrivyWrapper>
       <div className="flex min-h-screen bg-slate-950">
+        
+        {/* Menú Lateral (Sidebar) */}
         <aside className="w-64 border-r border-slate-800 bg-slate-900/50 p-6 hidden md:block">
           <Link href="/" className="flex items-center gap-2 mb-10">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-cyan-400 font-bold text-white shadow-lg">
@@ -54,6 +63,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </nav>
         </aside>
 
+        {/* Contenido Principal */}
         <main className="flex-1 overflow-auto">
           {children}
         </main>
