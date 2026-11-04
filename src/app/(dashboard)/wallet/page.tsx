@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
@@ -45,12 +45,15 @@ export default function WalletPage() {
   const [explorerUrl, setExplorerUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  // Pestañita de depósitos en tiempo real
+  // Pestañita de depósitos
   const [incomingDeposit, setIncomingDeposit] = useState<DetectedDeposit | null>(null);
+  
+  // 🔥 ESCUDO ANTI-DUPLICADOS: Guarda en memoria los hashes que ya se mostraron
+  const seenHashesRef = useRef<Set<string>>(new Set());
 
   const uid = auth.currentUser?.uid || "";
 
-  // 1. Cargar precios reales de CoinGecko
+  // 1. Cargar precios
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -70,7 +73,7 @@ export default function WalletPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // 2. Ticker visual de precios (para el efecto de fluctuación)
+  // 2. Ticker visual
   useEffect(() => {
     const ticker = setInterval(() => {
       setLivePrices((prev) => {
@@ -95,7 +98,7 @@ export default function WalletPage() {
     return () => clearInterval(ticker);
   }, []);
 
-  // 3. Escuchar saldos reales de Firestore
+  // 3. Escuchar saldos
   useEffect(() => {
     if (!uid) return;
     const unsubscribe = onSnapshot(collection(db, "users", uid, "balances"), (snapshot) => {
@@ -106,19 +109,17 @@ export default function WalletPage() {
     return () => unsubscribe();
   }, [uid]);
 
-  // 🔥 4. EL VERDADERO MOTOR DE DETECCIÓN (Usa tu API real)
+  // 🔥 4. MOTOR DE DETECCIÓN CON ESCUDO ANTI-DUPLICADOS
   const checkIncomingTransactions = useCallback(async () => {
     if (!uid) return;
 
     try {
-      // Buscamos todas las billeteras que el usuario tiene generadas
       const walletsSnap = await getDocs(collection(db, "users", uid, "wallets"));
       
       for (const walletDoc of walletsSnap.docs) {
         const symbol = walletDoc.id; 
         const address = walletDoc.data().address;
 
-        // Llamada REAL a tu backend de GetBlock/Blockscout
         const res = await fetch('/api/check-deposits', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -128,55 +129,58 @@ export default function WalletPage() {
         if (!res.ok) continue;
         const data = await res.json();
 
-        // Si la API detecta depósitos, los procesamos
         if (data.deposits && data.deposits.length > 0) {
-          // Tomamos la transacción más reciente
-          const latestTx = data.deposits[0]; 
-          
-          // Comprobamos si ya hemos procesado este hash antes
-          let isAlreadyProcessed = false;
-          
-          if (latestTx.confirmations >= 1) {
-            // 🔥 TIENE CONFIRMACIÓN: Lo sumamos al saldo automáticamente
-            await runTransaction(db, async (transaction) => {
-              const processedRef = doc(db, "users", uid, "processed_transactions", latestTx.hash);
-              const processedDoc = await transaction.get(processedRef);
+          // Iteramos sobre TODOS los depósitos, no solo el primero
+          for (const tx of data.deposits) {
+            
+            // 🔥 EL ESCUDO: Si ya vimos esta transacción en esta sesión, la saltamos
+            if (seenHashesRef.current.has(tx.hash)) continue;
+            
+            // La marcamos como vista para que no vuelva a salir en el próximo ciclo
+            seenHashesRef.current.add(tx.hash);
+
+            if (tx.confirmations >= 1) {
+              // TIENE CONFIRMACIÓN: Procesar en Firebase
+              let isAlreadyProcessed = false;
               
-              if (processedDoc.exists()) {
-                isAlreadyProcessed = true; // Ya lo sumamos en el pasado
-                return;
+              await runTransaction(db, async (transaction) => {
+                const processedRef = doc(db, "users", uid, "processed_transactions", tx.hash);
+                const processedDoc = await transaction.get(processedRef);
+                
+                if (processedDoc.exists()) {
+                  isAlreadyProcessed = true;
+                  return;
+                }
+
+                const balanceRef = doc(db, "users", uid, "balances", symbol.toUpperCase());
+                const balanceDoc = await transaction.get(balanceRef);
+                const currentBalance = balanceDoc.exists() ? balanceDoc.data().amount || 0 : 0;
+
+                transaction.set(balanceRef, { amount: currentBalance + parseFloat(tx.amount) }, { merge: true });
+                transaction.set(processedRef, { amount: tx.amount, symbol, timestamp: Date.now() });
+              });
+
+              // Solo mostramos la pestaña verde si es la primera vez que se procesa
+              if (!isAlreadyProcessed) {
+                setIncomingDeposit({
+                  symbol,
+                  amount: tx.amount,
+                  hash: tx.hash,
+                  confirmations: tx.confirmations
+                });
+                setTimeout(() => setIncomingDeposit(null), 5000);
               }
 
-              // Si no está procesado, lo sumamos al saldo
-              const balanceRef = doc(db, "users", uid, "balances", symbol.toUpperCase());
-              const balanceDoc = await transaction.get(balanceRef);
-              const currentBalance = balanceDoc.exists() ? balanceDoc.data().amount || 0 : 0;
-
-              transaction.set(balanceRef, { amount: currentBalance + parseFloat(latestTx.amount) }, { merge: true });
-              transaction.set(processedRef, { amount: latestTx.amount, symbol, timestamp: Date.now() });
-            });
-
-            if (!isAlreadyProcessed) {
-              // Mostramos el aviso de que se ha sumado
+            } else {
+              // ESTÁ PENDIENTE: Mostrar pestaña azul
               setIncomingDeposit({
                 symbol,
-                amount: latestTx.amount,
-                hash: latestTx.hash,
-                confirmations: latestTx.confirmations
+                amount: tx.amount,
+                hash: tx.hash,
+                confirmations: tx.confirmations
               });
-              
-              // Ocultar el aviso después de 5 segundos
               setTimeout(() => setIncomingDeposit(null), 5000);
             }
-
-          } else {
-            // 🔥 ESTÁ PENDIENTE (0 confirmaciones): Mostramos la pestañita
-            setIncomingDeposit({
-              symbol,
-              amount: latestTx.amount,
-              hash: latestTx.hash,
-              confirmations: latestTx.confirmations
-            });
           }
         }
       }
@@ -189,8 +193,7 @@ export default function WalletPage() {
   useEffect(() => {
     if (!uid || !authenticated) return;
     
-    checkIncomingTransactions(); // Ejecución inicial
-    
+    checkIncomingTransactions(); 
     const interval = setInterval(checkIncomingTransactions, 15000);
     return () => clearInterval(interval);
   }, [uid, authenticated, checkIncomingTransactions]);
@@ -291,7 +294,6 @@ export default function WalletPage() {
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
         
-        {/* CABECERA CON BALANCE Y PESTAÑITA */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-10 rounded-3xl border border-indigo-500/20 bg-gradient-to-br from-indigo-900/40 to-slate-900/80 p-8 shadow-xl relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500 rounded-full blur-[100px] opacity-20 pointer-events-none" />
           
@@ -309,7 +311,6 @@ export default function WalletPage() {
               </h1>
             </div>
 
-            {/* PESTAÑITA DE TRANSACCIÓN ENTRANTE (REAL) */}
             <AnimatePresence>
               {incomingDeposit && (
                 <motion.div 
