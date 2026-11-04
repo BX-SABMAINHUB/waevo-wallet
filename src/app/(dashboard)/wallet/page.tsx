@@ -45,12 +45,12 @@ export default function WalletPage() {
   const [explorerUrl, setExplorerUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  // 🔥 NUEVO ESTADO: Para la pestañita de depósitos detectados
+  // Pestañita de depósitos en tiempo real
   const [incomingDeposit, setIncomingDeposit] = useState<DetectedDeposit | null>(null);
 
   const uid = auth.currentUser?.uid || "";
 
-  // 1. Cargar precios
+  // 1. Cargar precios reales de CoinGecko
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -70,7 +70,7 @@ export default function WalletPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // 2. Ticker simulado
+  // 2. Ticker visual de precios (para el efecto de fluctuación)
   useEffect(() => {
     const ticker = setInterval(() => {
       setLivePrices((prev) => {
@@ -95,7 +95,7 @@ export default function WalletPage() {
     return () => clearInterval(ticker);
   }, []);
 
-  // 3. Escuchar saldos desde Firestore
+  // 3. Escuchar saldos reales de Firestore
   useEffect(() => {
     if (!uid) return;
     const unsubscribe = onSnapshot(collection(db, "users", uid, "balances"), (snapshot) => {
@@ -106,19 +106,19 @@ export default function WalletPage() {
     return () => unsubscribe();
   }, [uid]);
 
-  // 🔥 4. DETECTOR AUTOMÁTICO DE PAGOS (El nuevo motor)
-  const checkForIncomingFunds = useCallback(async () => {
+  // 🔥 4. EL VERDADERO MOTOR DE DETECCIÓN (Usa tu API real)
+  const checkIncomingTransactions = useCallback(async () => {
     if (!uid) return;
 
     try {
-      // Obtenemos todas las billeteras del usuario desde Firestore
+      // Buscamos todas las billeteras que el usuario tiene generadas
       const walletsSnap = await getDocs(collection(db, "users", uid, "wallets"));
       
       for (const walletDoc of walletsSnap.docs) {
-        const symbol = walletDoc.id; // Ej. "LTC"
+        const symbol = walletDoc.id; 
         const address = walletDoc.data().address;
 
-        // Consultamos a tu API si hay depósitos en esa dirección
+        // Llamada REAL a tu backend de GetBlock/Blockscout
         const res = await fetch('/api/check-deposits', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -128,59 +128,55 @@ export default function WalletPage() {
         if (!res.ok) continue;
         const data = await res.json();
 
+        // Si la API detecta depósitos, los procesamos
         if (data.deposits && data.deposits.length > 0) {
-          for (const dep of data.deposits) {
-            // Verificamos si este depósito ya ha sido procesado antes
-            const claimedRef = doc(db, "users", uid, "claimed_transactions", "history");
-            const claimedSnap = await getDocs(collection(db, "users", uid, "claimed_transactions"));
-            // (Asumimos que hashes ya procesados están en la colección claimed_transactions)
-            
-            // Para simplificar y evitar dobles lecturas en este ejemplo,
-            // usaremos una transacción atómica que comprueba y suma a la vez.
-            
-            if (dep.confirmations >= 1) {
-              // ¡TIENE CONFIRMACIÓN! Lo sumamos automáticamente
-              let isProcessed = false;
-
-              await runTransaction(db, async (transaction) => {
-                const processedRef = doc(db, "users", uid, "processed_hashes", dep.hash);
-                const processedDoc = await transaction.get(processedRef);
-                
-                if (processedDoc.exists()) {
-                  isProcessed = true; // Ya se procesó antes
-                  return;
-                }
-
-                // Si no se ha procesado, lo sumamos al saldo
-                const balanceRef = doc(db, "users", uid, "balances", symbol.toUpperCase());
-                const balanceDoc = await transaction.get(balanceRef);
-                const currentBalance = balanceDoc.exists() ? balanceDoc.data().amount || 0 : 0;
-
-                transaction.set(balanceRef, { amount: currentBalance + parseFloat(dep.amount) }, { merge: true });
-                transaction.set(processedRef, { timestamp: Date.now() }); // Lo marcamos como procesado
-              });
-
-              if (!isProcessed) {
-                // Mostramos la notificación de que se ha sumado (opcional)
-                setIncomingDeposit({
-                  symbol,
-                  amount: dep.amount,
-                  hash: dep.hash,
-                  confirmations: dep.confirmations
-                });
-                // Desaparece a los 5 segundos
-                setTimeout(() => setIncomingDeposit(null), 5000);
+          // Tomamos la transacción más reciente
+          const latestTx = data.deposits[0]; 
+          
+          // Comprobamos si ya hemos procesado este hash antes
+          let isAlreadyProcessed = false;
+          
+          if (latestTx.confirmations >= 1) {
+            // 🔥 TIENE CONFIRMACIÓN: Lo sumamos al saldo automáticamente
+            await runTransaction(db, async (transaction) => {
+              const processedRef = doc(db, "users", uid, "processed_transactions", latestTx.hash);
+              const processedDoc = await transaction.get(processedRef);
+              
+              if (processedDoc.exists()) {
+                isAlreadyProcessed = true; // Ya lo sumamos en el pasado
+                return;
               }
 
-            } else {
-              // ESTÁ PENDIENTE (0 confirmaciones): Mostramos la pestañita
+              // Si no está procesado, lo sumamos al saldo
+              const balanceRef = doc(db, "users", uid, "balances", symbol.toUpperCase());
+              const balanceDoc = await transaction.get(balanceRef);
+              const currentBalance = balanceDoc.exists() ? balanceDoc.data().amount || 0 : 0;
+
+              transaction.set(balanceRef, { amount: currentBalance + parseFloat(latestTx.amount) }, { merge: true });
+              transaction.set(processedRef, { amount: latestTx.amount, symbol, timestamp: Date.now() });
+            });
+
+            if (!isAlreadyProcessed) {
+              // Mostramos el aviso de que se ha sumado
               setIncomingDeposit({
                 symbol,
-                amount: dep.amount,
-                hash: dep.hash,
-                confirmations: dep.confirmations
+                amount: latestTx.amount,
+                hash: latestTx.hash,
+                confirmations: latestTx.confirmations
               });
+              
+              // Ocultar el aviso después de 5 segundos
+              setTimeout(() => setIncomingDeposit(null), 5000);
             }
+
+          } else {
+            // 🔥 ESTÁ PENDIENTE (0 confirmaciones): Mostramos la pestañita
+            setIncomingDeposit({
+              symbol,
+              amount: latestTx.amount,
+              hash: latestTx.hash,
+              confirmations: latestTx.confirmations
+            });
           }
         }
       }
@@ -189,17 +185,15 @@ export default function WalletPage() {
     }
   }, [uid]);
 
-  // Ejecutamos el detector cada 20 segundos
+  // Ejecutar el motor cada 15 segundos
   useEffect(() => {
     if (!uid || !authenticated) return;
     
-    // Primera comprobación al entrar
-    checkForIncomingFunds();
+    checkIncomingTransactions(); // Ejecución inicial
     
-    // Bucle automático
-    const interval = setInterval(checkForIncomingFunds, 20000);
+    const interval = setInterval(checkIncomingTransactions, 15000);
     return () => clearInterval(interval);
-  }, [uid, authenticated, checkForIncomingFunds]);
+  }, [uid, authenticated, checkIncomingTransactions]);
 
   const handleOpenReceive = async (coin: Coin) => {
     if (!uid) return;
@@ -297,7 +291,7 @@ export default function WalletPage() {
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
         
-        {/* CABECERA CON BALANCE Y PESTAÑITA DE DEPÓSITO */}
+        {/* CABECERA CON BALANCE Y PESTAÑITA */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-10 rounded-3xl border border-indigo-500/20 bg-gradient-to-br from-indigo-900/40 to-slate-900/80 p-8 shadow-xl relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500 rounded-full blur-[100px] opacity-20 pointer-events-none" />
           
@@ -315,22 +309,24 @@ export default function WalletPage() {
               </h1>
             </div>
 
-            {/* 🔥 PESTAÑITA DE NOTIFICACIÓN DE PAGO ENTRANTE */}
+            {/* PESTAÑITA DE TRANSACCIÓN ENTRANTE (REAL) */}
             <AnimatePresence>
               {incomingDeposit && (
                 <motion.div 
                   initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }}
-                  className="bg-indigo-500/20 border border-indigo-500/50 p-4 rounded-xl flex items-start gap-3 min-w-[300px]"
+                  className={`border p-4 rounded-xl flex items-start gap-3 min-w-[300px] ${incomingDeposit.confirmations > 0 ? 'bg-emerald-500/20 border-emerald-500/50' : 'bg-indigo-500/20 border-indigo-500/50'}`}
                 >
-                  <div className="bg-indigo-500 p-2 rounded-lg text-white">
+                  <div className={`p-2 rounded-lg text-white ${incomingDeposit.confirmations > 0 ? 'bg-emerald-500' : 'bg-indigo-500'}`}>
                     <Bell size={20} className={incomingDeposit.confirmations === 0 ? "animate-bounce" : ""} />
                   </div>
                   <div>
-                    <h4 className="text-white font-bold text-sm">¡Pago Detectado!</h4>
-                    <p className="text-indigo-300 text-xs mt-1">
+                    <h4 className="text-white font-bold text-sm">
+                      {incomingDeposit.confirmations > 0 ? "¡Pago Confirmado!" : "¡Pago Detectado!"}
+                    </h4>
+                    <p className="text-slate-200 text-xs mt-1">
                       Recibiendo <strong>{incomingDeposit.amount} {incomingDeposit.symbol}</strong>
                     </p>
-                    <p className="text-slate-400 text-[10px] mt-1">
+                    <p className={`text-[10px] mt-1 ${incomingDeposit.confirmations > 0 ? 'text-emerald-300' : 'text-indigo-300'}`}>
                       {incomingDeposit.confirmations === 0 
                         ? "Esperando confirmaciones de la red..." 
                         : `Confirmado (${incomingDeposit.confirmations} confirmaciones). Añadido al saldo.`}
