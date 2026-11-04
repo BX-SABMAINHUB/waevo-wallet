@@ -1,18 +1,24 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
-import { useWallets, usePrivy } from "@privy-io/react-auth";
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { usePrivy } from "@privy-io/react-auth";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "@/components/motion-client";
-import { collection, onSnapshot } from "firebase/firestore";
+import { collection, onSnapshot, doc, runTransaction, getDocs } from "firebase/firestore";
 import { db, auth } from "@/lib/firebase";
 import { 
   Search, ArrowDownLeft, ArrowUpRight, X, Copy, CheckCircle2, 
   Wallet, Loader2, TrendingUp, TrendingDown, Coins, 
-  AlertCircle, Send, ExternalLink
+  AlertCircle, Send, ExternalLink, Bell
 } from "lucide-react";
 
 interface Coin { id: string; symbol: string; name: string; image: string; current_price: number; price_change_percentage_24h: number; }
+interface DetectedDeposit {
+  symbol: string;
+  amount: string;
+  hash: string;
+  confirmations: number;
+}
 
 export default function WalletPage() {
   const { ready, authenticated, login } = usePrivy();
@@ -26,10 +32,11 @@ export default function WalletPage() {
   const [depositAddresses, setDepositAddresses] = useState<Record<string, string>>({});
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
 
-  // Precios en tiempo real (Ticker)
+  // Precios en tiempo real
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
   const [priceTrends, setPriceTrends] = useState<Record<string, "up" | "down" | "same">>({});
 
+  // Estados para Enviar
   const [sendAddress, setSendAddress] = useState("");
   const [sendAmount, setSendAmount] = useState(""); 
   const [isSending, setIsSending] = useState(false);
@@ -38,9 +45,12 @@ export default function WalletPage() {
   const [explorerUrl, setExplorerUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // 🔥 NUEVO ESTADO: Para la pestañita de depósitos detectados
+  const [incomingDeposit, setIncomingDeposit] = useState<DetectedDeposit | null>(null);
+
   const uid = auth.currentUser?.uid || "";
 
-  // 1. Sincronizar precios reales cada 60s
+  // 1. Cargar precios
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -60,7 +70,7 @@ export default function WalletPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // 2. Ticker simulado cada 1 segundo
+  // 2. Ticker simulado
   useEffect(() => {
     const ticker = setInterval(() => {
       setLivePrices((prev) => {
@@ -85,7 +95,7 @@ export default function WalletPage() {
     return () => clearInterval(ticker);
   }, []);
 
-  // 3. Escuchar saldos
+  // 3. Escuchar saldos desde Firestore
   useEffect(() => {
     if (!uid) return;
     const unsubscribe = onSnapshot(collection(db, "users", uid, "balances"), (snapshot) => {
@@ -95,6 +105,101 @@ export default function WalletPage() {
     });
     return () => unsubscribe();
   }, [uid]);
+
+  // 🔥 4. DETECTOR AUTOMÁTICO DE PAGOS (El nuevo motor)
+  const checkForIncomingFunds = useCallback(async () => {
+    if (!uid) return;
+
+    try {
+      // Obtenemos todas las billeteras del usuario desde Firestore
+      const walletsSnap = await getDocs(collection(db, "users", uid, "wallets"));
+      
+      for (const walletDoc of walletsSnap.docs) {
+        const symbol = walletDoc.id; // Ej. "LTC"
+        const address = walletDoc.data().address;
+
+        // Consultamos a tu API si hay depósitos en esa dirección
+        const res = await fetch('/api/check-deposits', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol, address }),
+        });
+
+        if (!res.ok) continue;
+        const data = await res.json();
+
+        if (data.deposits && data.deposits.length > 0) {
+          for (const dep of data.deposits) {
+            // Verificamos si este depósito ya ha sido procesado antes
+            const claimedRef = doc(db, "users", uid, "claimed_transactions", "history");
+            const claimedSnap = await getDocs(collection(db, "users", uid, "claimed_transactions"));
+            // (Asumimos que hashes ya procesados están en la colección claimed_transactions)
+            
+            // Para simplificar y evitar dobles lecturas en este ejemplo,
+            // usaremos una transacción atómica que comprueba y suma a la vez.
+            
+            if (dep.confirmations >= 1) {
+              // ¡TIENE CONFIRMACIÓN! Lo sumamos automáticamente
+              let isProcessed = false;
+
+              await runTransaction(db, async (transaction) => {
+                const processedRef = doc(db, "users", uid, "processed_hashes", dep.hash);
+                const processedDoc = await transaction.get(processedRef);
+                
+                if (processedDoc.exists()) {
+                  isProcessed = true; // Ya se procesó antes
+                  return;
+                }
+
+                // Si no se ha procesado, lo sumamos al saldo
+                const balanceRef = doc(db, "users", uid, "balances", symbol.toUpperCase());
+                const balanceDoc = await transaction.get(balanceRef);
+                const currentBalance = balanceDoc.exists() ? balanceDoc.data().amount || 0 : 0;
+
+                transaction.set(balanceRef, { amount: currentBalance + parseFloat(dep.amount) }, { merge: true });
+                transaction.set(processedRef, { timestamp: Date.now() }); // Lo marcamos como procesado
+              });
+
+              if (!isProcessed) {
+                // Mostramos la notificación de que se ha sumado (opcional)
+                setIncomingDeposit({
+                  symbol,
+                  amount: dep.amount,
+                  hash: dep.hash,
+                  confirmations: dep.confirmations
+                });
+                // Desaparece a los 5 segundos
+                setTimeout(() => setIncomingDeposit(null), 5000);
+              }
+
+            } else {
+              // ESTÁ PENDIENTE (0 confirmaciones): Mostramos la pestañita
+              setIncomingDeposit({
+                symbol,
+                amount: dep.amount,
+                hash: dep.hash,
+                confirmations: dep.confirmations
+              });
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error verificando depósitos:", error);
+    }
+  }, [uid]);
+
+  // Ejecutamos el detector cada 20 segundos
+  useEffect(() => {
+    if (!uid || !authenticated) return;
+    
+    // Primera comprobación al entrar
+    checkForIncomingFunds();
+    
+    // Bucle automático
+    const interval = setInterval(checkForIncomingFunds, 20000);
+    return () => clearInterval(interval);
+  }, [uid, authenticated, checkForIncomingFunds]);
 
   const handleOpenReceive = async (coin: Coin) => {
     if (!uid) return;
@@ -175,9 +280,6 @@ export default function WalletPage() {
   if (!ready) return <div className="p-10 text-white">Cargando...</div>;
   if (!authenticated) return <div className="p-10 text-center text-white">Inicia sesión para ver tu billetera. <button onClick={login} className="text-indigo-400">Entrar</button></div>;
 
-  // ==========================================
-  // CÁLCULOS EN VIVO PARA EL MODAL DE ENVIAR
-  // ==========================================
   const livePrice = selectedCoin ? (livePrices[selectedCoin.symbol.toUpperCase()] || 0) : 0;
   const amountEur = parseFloat(sendAmount) || 0;
   const cryptoAmount = amountEur / (livePrice || 1); 
@@ -185,32 +287,58 @@ export default function WalletPage() {
   const calculatedFeeEur = amountEur <= 5 ? 0.01 : amountEur * 0.025;
   
   const currentBalanceCrypto = selectedCoin ? (coinBalances[selectedCoin.symbol.toUpperCase()] || 0) : 0;
-  const currentBalanceEur = currentBalanceCrypto * livePrice; // Saldo real en euros (ej. 0.03419)
+  const currentBalanceEur = currentBalanceCrypto * livePrice; 
   
   const totalNeededEur = amountEur + calculatedFeeEur;
   const hasEnoughBalance = totalNeededEur <= currentBalanceEur;
-
-  // 🔥 CALCULAMOS EL MÁXIMO QUE PUEDE ENVIAR EL USUARIO (Saldo - Comisión mínima)
-  // Para saber cuánto puede enviar, restamos la comisión de 0.01€ a su saldo real
   const maxSendableEur = Math.max(0, currentBalanceEur - 0.01);
 
   return (
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl">
-        {/* CABECERA */}
+        
+        {/* CABECERA CON BALANCE Y PESTAÑITA DE DEPÓSITO */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-10 rounded-3xl border border-indigo-500/20 bg-gradient-to-br from-indigo-900/40 to-slate-900/80 p-8 shadow-xl relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500 rounded-full blur-[100px] opacity-20 pointer-events-none" />
-          <div className="relative z-10">
-            <p className="text-sm font-medium text-indigo-300 mb-1 flex items-center gap-2">
-              <Coins size={16} /> Balance Total (En Vivo)
-            </p>
-            <h1 className="text-4xl md:text-5xl font-bold text-white tracking-tight flex items-center gap-4">
-              €{totalEur.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              <span className="flex h-3 w-3 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-              </span>
-            </h1>
+          
+          <div className="relative z-10 flex flex-col md:flex-row md:items-start justify-between gap-6">
+            <div>
+              <p className="text-sm font-medium text-indigo-300 mb-1 flex items-center gap-2">
+                <Coins size={16} /> Balance Total (En Vivo)
+              </p>
+              <h1 className="text-4xl md:text-5xl font-bold text-white tracking-tight flex items-center gap-4">
+                €{totalEur.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                <span className="flex h-3 w-3 relative">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+                </span>
+              </h1>
+            </div>
+
+            {/* 🔥 PESTAÑITA DE NOTIFICACIÓN DE PAGO ENTRANTE */}
+            <AnimatePresence>
+              {incomingDeposit && (
+                <motion.div 
+                  initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }}
+                  className="bg-indigo-500/20 border border-indigo-500/50 p-4 rounded-xl flex items-start gap-3 min-w-[300px]"
+                >
+                  <div className="bg-indigo-500 p-2 rounded-lg text-white">
+                    <Bell size={20} className={incomingDeposit.confirmations === 0 ? "animate-bounce" : ""} />
+                  </div>
+                  <div>
+                    <h4 className="text-white font-bold text-sm">¡Pago Detectado!</h4>
+                    <p className="text-indigo-300 text-xs mt-1">
+                      Recibiendo <strong>{incomingDeposit.amount} {incomingDeposit.symbol}</strong>
+                    </p>
+                    <p className="text-slate-400 text-[10px] mt-1">
+                      {incomingDeposit.confirmations === 0 
+                        ? "Esperando confirmaciones de la red..." 
+                        : `Confirmado (${incomingDeposit.confirmations} confirmaciones). Añadido al saldo.`}
+                    </p>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         </motion.div>
 
@@ -274,7 +402,7 @@ export default function WalletPage() {
         )}
       </AnimatePresence>
 
-      {/* MODAL ENVIAR (CANTIDAD EN EUROS CON MÁXIMO CALCULADO) */}
+      {/* MODAL ENVIAR */}
       <AnimatePresence>
         {modalType === "send" && selectedCoin && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setModalType(null)}>
@@ -288,7 +416,6 @@ export default function WalletPage() {
                 <div>
                   <div className="flex justify-between text-xs text-slate-400 mb-1">
                     <span>Cantidad a enviar</span>
-                    {/* 🔥 MOSTRAMOS EL SALDO EXACTO EN EUROS */}
                     <span>Disponible: €{currentBalanceEur.toFixed(3)}</span> 
                   </div>
                   <div className="relative">
@@ -303,7 +430,6 @@ export default function WalletPage() {
                   )}
                 </div>
 
-                {/* Aviso de límites y comisiones */}
                 <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700 text-xs space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="text-slate-400">Límites permitidos:</span>
@@ -318,7 +444,6 @@ export default function WalletPage() {
                     </div>
                   )}
                   
-                  {/* 🔥 MENSAJE DE ERROR SÚPER CLARO */}
                   {!hasEnoughBalance && sendAmount && (
                     <div className="flex flex-col text-red-400 gap-1 mt-2 pt-2 border-t border-red-500/20">
                       <span className="font-semibold">Saldo insuficiente.</span>
