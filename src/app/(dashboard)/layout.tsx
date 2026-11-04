@@ -8,7 +8,8 @@ import {
   Compass, 
   Wallet, 
   ArrowRightLeft, 
-  Settings 
+  Settings,
+  BookOpen
 } from "lucide-react";
 
 // Cargamos Privy SOLO en el cliente para evitar errores de SSR (createContext)
@@ -17,12 +18,13 @@ const PrivyWrapper = dynamic(
   { ssr: false }
 );
 
-// Menú de navegación lateral (Actualizado sin "Ingresos y Historial")
+// Menú de navegación lateral completo
 const NAV_ITEMS = [
   { name: "Overview", href: "/overview", icon: LayoutDashboard },
   { name: "Explorar", href: "/explore", icon: Compass },
   { name: "Tu Billetera", href: "/wallet", icon: Wallet },
   { name: "Exchange y Cambios", href: "/exchange", icon: ArrowRightLeft },
+  { name: "Información y Documentación", href: "/documentation", icon: BookOpen },
   { name: "Ajustes", href: "/settings", icon: Settings },
 ];
 
