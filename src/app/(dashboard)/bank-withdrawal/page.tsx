@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { motion, AnimatePresence } from "@/components/motion-client";
 import { collection, onSnapshot } from "firebase/firestore";
@@ -69,7 +69,7 @@ export default function BankWithdrawalPage() {
     return () => unsubscribe();
   }, [uid]);
 
-  // 3. Validación de IBAN y detección de banco (Llamada a API interna segura)
+  // 3. Validación de IBAN a través de la API interna
   const validateIban = async (value: string) => {
     const cleanIban = value.replace(/\s+/g, '').toUpperCase();
     setIban(value); 
@@ -91,7 +91,7 @@ export default function BankWithdrawalPage() {
 
       const data = await res.json();
       
-      if (!res.ok) {
+      if (!res.ok || data.error) {
         setIbanError(data.error || "Error del servidor al validar el IBAN.");
         return;
       }
@@ -101,7 +101,7 @@ export default function BankWithdrawalPage() {
       } else if (data.valid) {
         setBankName("Banco no identificado");
       } else {
-        setIbanError("El IBAN introducido no es válido o no pertenece a un banco reconocido.");
+        setIbanError("El IBAN introducido no es válido.");
       }
     } catch (error: any) {
       console.error("Error validando IBAN:", error);
@@ -119,7 +119,7 @@ export default function BankWithdrawalPage() {
 
   const isValidAmount = amountEur >= 0.10 && amountEur <= 300;
   const hasEnoughBalance = amountEur <= currentBalanceEur;
-  const isValidIban = bankName !== null;
+  const isValidIban = bankName !== null && bankName !== "Banco no identificado";
 
   const handleWithdraw = async () => {
     if (!selectedCoin || !isValidAmount || !hasEnoughBalance || !isValidIban) return;
@@ -129,7 +129,6 @@ export default function BankWithdrawalPage() {
     setSuccess(null);
 
     try {
-      // Llamada al backend para procesar el retiro real (Striga)
       const res = await fetch('/api/withdraw-striga', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -261,7 +260,7 @@ export default function BankWithdrawalPage() {
                       value={iban}
                       onChange={e => validateIban(e.target.value)}
                       className={`w-full bg-slate-800/80 border rounded-xl p-4 text-white font-mono text-sm outline-none focus:border-indigo-500 transition uppercase ${
-                        (!isValidIban && iban && !isValidatingIban) || ibanError ? 'border-red-500' : 'border-slate-700'
+                        (!isValidIban && iban) || ibanError ? 'border-red-500' : 'border-slate-700'
                       }`}
                     />
                     {isValidatingIban && (
@@ -274,7 +273,7 @@ export default function BankWithdrawalPage() {
                   
                   {/* Detección de Banco y Errores */}
                   <AnimatePresence>
-                    {bankName && (
+                    {bankName && bankName !== "Banco no identificado" && (
                       <motion.div 
                         initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
                         className="mt-3 flex items-center gap-2 text-emerald-400 text-sm bg-emerald-500/10 p-3 rounded-lg border border-emerald-500/20"
@@ -289,14 +288,6 @@ export default function BankWithdrawalPage() {
                         className="text-xs text-red-400 mt-2 flex items-center gap-1"
                       >
                         <AlertCircle size={12} /> {ibanError}
-                      </motion.p>
-                    )}
-                    {!isValidIban && iban && !isValidatingIban && !ibanError && iban.replace(/\s+/g, '').length > 15 && (
-                      <motion.p 
-                        initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                        className="text-xs text-red-400 mt-2 flex items-center gap-1"
-                      >
-                        <AlertCircle size={12} /> IBAN no válido o no identificado.
                       </motion.p>
                     )}
                   </AnimatePresence>
