@@ -37,8 +37,6 @@ async function fetchFromGetBlock(address: string, symbol: string, token: string)
   if (statusRes.ok) {
     const statusData = await statusRes.json();
     currentBlock = statusData.backend?.blocks || statusData.blockbook?.bestHeight || 0;
-  } else {
-    console.warn(`[GetBlock] No se pudo obtener el estado de ${symbol}`);
   }
 
   // 2. Obtener el saldo y las transacciones de la dirección
@@ -65,6 +63,9 @@ async function fetchFromGetBlock(address: string, symbol: string, token: string)
 
   for (const tx of transactions) {
     let receivedValue = 0;
+    let isSpentByAddress = false; // 🔥 Bandera para detectar si somos el emisor
+
+    // Sumar si la dirección está en los outputs (posible depósito o cambio)
     if (tx.vout) {
       for (const out of tx.vout) {
         if (out.addresses?.includes(address)) {
@@ -73,7 +74,20 @@ async function fetchFromGetBlock(address: string, symbol: string, token: string)
       }
     }
 
-    if (receivedValue <= 0) continue;
+    // Comprobar si la dirección está en los inputs (significa que TÚ enviaste la transacción)
+    if (tx.vin) {
+      for (const inp of tx.vin) {
+        if (inp.addresses?.includes(address)) {
+          isSpentByAddress = true;
+          break;
+        }
+      }
+    }
+
+    // 🔥 CORRECCIÓN CLAVE: 
+    // Si no recibimos nada, o si nosotros somos los que enviamos (isSpentByAddress), lo ignoramos.
+    // Así evitamos que el "cambio" (change) de nuestras propias transacciones se cuente como depósito.
+    if (receivedValue <= 0 || isSpentByAddress) continue;
 
     const confirmations = tx.confirmations || 0;
     const status = confirmations >= 1 ? 'confirmed' : 'pending';
@@ -130,8 +144,12 @@ async function fetchFromBlockscout(address: string, symbol: string, chainId: num
   let confirmedBalance = 0;
 
   for (const tx of data.result) {
+    // Solo nos interesan las transacciones donde somos el receptor
     if (tx.to?.toLowerCase() !== address.toLowerCase()) continue;
     
+    // 🔥 CORRECCIÓN CLAVE: Evitar self-transfers (enviarte dinero a ti mismo en EVM)
+    if (tx.from?.toLowerCase() === address.toLowerCase()) continue;
+
     const value = parseFloat(tx.value) / Math.pow(10, decimals);
     if (value <= 0) continue;
 
