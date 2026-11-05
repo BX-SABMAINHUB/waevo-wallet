@@ -37,7 +37,7 @@ export default function BankWithdrawalPage() {
 
   const uid = auth.currentUser?.uid || "";
 
-  // 1. Cargar precios reales
+  // 1. Cargar precios reales de CoinGecko
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -55,7 +55,7 @@ export default function BankWithdrawalPage() {
     fetchCoins();
   }, []);
 
-  // 2. Escuchar saldos en tiempo real
+  // 2. Escuchar saldos en tiempo real desde Firestore
   useEffect(() => {
     if (!uid) return;
     const unsubscribe = onSnapshot(collection(db, "users", uid, "balances"), (snapshot) => {
@@ -68,10 +68,11 @@ export default function BankWithdrawalPage() {
     return () => unsubscribe();
   }, [uid]);
 
-  // 3. Validación de IBAN y detección de banco (OpenIBAN)
+  // 3. Validación de IBAN y detección de banco (Llamada a API interna segura)
   const validateIban = async (value: string) => {
+    // Formatear IBAN (quitar espacios y pasar a mayúsculas para la validación)
     const cleanIban = value.replace(/\s+/g, '').toUpperCase();
-    setIban(value);
+    setIban(value); 
     
     if (cleanIban.length < 15) { 
       setBankName(null); 
@@ -82,11 +83,19 @@ export default function BankWithdrawalPage() {
     setBankName(null);
     
     try {
-      const res = await fetch(`https://openiban.com/validate/${cleanIban}?getBIC=true`);
+      // 🔥 Llamada a nuestra propia API Route para proteger la clave de IBANforge
+      const res = await fetch('/api/validate-iban', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ iban: cleanIban }),
+      });
+
       const data = await res.json();
       
-      if (data.valid) {
-        setBankName(data.bankData?.name || "Banco no identificado");
+      if (data.valid && data.bankName) {
+        setBankName(data.bankName);
+      } else if (data.valid) {
+        setBankName("Banco no identificado");
       } else {
         setBankName(null);
       }
@@ -107,6 +116,8 @@ export default function BankWithdrawalPage() {
   // Límites del retiro (0.10€ - 300€)
   const isValidAmount = amountEur >= 0.10 && amountEur <= 300;
   const hasEnoughBalance = amountEur <= currentBalanceEur;
+  
+  // El IBAN es válido si tenemos un nombre de banco detectado
   const isValidIban = bankName !== null;
 
   const handleWithdraw = async () => {
@@ -124,7 +135,7 @@ export default function BankWithdrawalPage() {
           userId: uid,
           symbol: selectedCoin.symbol.toUpperCase(),
           amountEur: amountEur,
-          iban: iban.replace(/\s+/g, '').toUpperCase(),
+          iban: iban.replace(/\s+/g, '').toUpperCase(), // Enviamos el IBAN limpio
         }),
       });
 
@@ -133,7 +144,7 @@ export default function BankWithdrawalPage() {
 
       setSuccess(`Retiro iniciado con éxito. Recibirás ${amountEur.toFixed(2)} € en tu cuenta bancaria en 1-2 días hábiles.`);
       
-      // Limpiar formulario
+      // Limpiar formulario tras el éxito
       setAmount("");
       setIban("");
       setBankName(null);
