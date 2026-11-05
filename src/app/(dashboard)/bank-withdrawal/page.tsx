@@ -7,7 +7,7 @@ import { collection, onSnapshot } from "firebase/firestore";
 import { db, auth } from "@/lib/firebase";
 import { 
   Landmark, Loader2, AlertCircle, CheckCircle2, 
-  Info, Building2, Wallet, ArrowRight
+  Info, Wallet, ArrowRight
 } from "lucide-react";
 
 interface Coin { 
@@ -28,9 +28,6 @@ export default function BankWithdrawalPage() {
   const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
   const [amount, setAmount] = useState("");
   const [iban, setIban] = useState("");
-  const [bankName, setBankName] = useState<string | null>(null);
-  const [isValidatingIban, setIsValidatingIban] = useState(false);
-  const [ibanError, setIbanError] = useState<string | null>(null);
   
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +35,7 @@ export default function BankWithdrawalPage() {
 
   const uid = auth.currentUser?.uid || "";
 
-  // 1. Cargar precios reales de CoinGecko
+  // 1. Cargar precios
   useEffect(() => {
     async function fetchCoins() {
       try {
@@ -56,7 +53,7 @@ export default function BankWithdrawalPage() {
     fetchCoins();
   }, []);
 
-  // 2. Escuchar saldos en tiempo real desde Firestore
+  // 2. Escuchar saldos
   useEffect(() => {
     if (!uid) return;
     const unsubscribe = onSnapshot(collection(db, "users", uid, "balances"), (snapshot) => {
@@ -69,66 +66,26 @@ export default function BankWithdrawalPage() {
     return () => unsubscribe();
   }, [uid]);
 
-  // 3. Validación de IBAN a través de la API interna (que usa Strale)
-  const validateIban = async (value: string) => {
-    const cleanIban = value.replace(/\s+/g, '').toUpperCase();
-    setIban(value); 
-    setIbanError(null);
-    setBankName(null);
-    
-    if (cleanIban.length < 15) { 
-      return; 
-    }
-    
-    setIsValidatingIban(true);
-    
-    try {
-      const res = await fetch('/api/validate-iban', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ iban: cleanIban }),
-      });
-
-      const data = await res.json();
-      
-      if (!res.ok || data.error) {
-        setIbanError(data.error || "Error del servidor al validar el IBAN.");
-        return;
-      }
-
-      if (data.valid && data.bankName) {
-        setBankName(data.bankName);
-      } else if (data.valid) {
-        setBankName("Banco no identificado");
-      } else {
-        setIbanError("El IBAN introducido no es válido.");
-      }
-    } catch (error: any) {
-      console.error("Error validando IBAN:", error);
-      setIbanError("Error de conexión al validar el IBAN.");
-    } finally {
-      setIsValidatingIban(false);
-    }
-  };
-
-  // Cálculos de saldo y validaciones
+  // Cálculos de saldo
   const selectedPrice = selectedCoin ? (livePrices[selectedCoin.symbol.toUpperCase()] || 0) : 0;
   const amountEur = parseFloat(amount) || 0;
   const currentBalance = selectedCoin ? (coinBalances[selectedCoin.symbol.toUpperCase()] || 0) : 0;
   const currentBalanceEur = currentBalance * selectedPrice;
 
+  // Solo comprobamos que haya datos, el límite de 0.10 a 300 y que haya saldo
   const isValidAmount = amountEur >= 0.10 && amountEur <= 300;
   const hasEnoughBalance = amountEur <= currentBalanceEur;
-  const isValidIban = bankName !== null && bankName !== "Banco no identificado";
+  const canSubmit = selectedCoin && amount && iban.length > 10 && isValidAmount && hasEnoughBalance;
 
   const handleWithdraw = async () => {
-    if (!selectedCoin || !isValidAmount || !hasEnoughBalance || !isValidIban) return;
+    if (!canSubmit) return;
     
     setIsProcessing(true);
     setError(null);
     setSuccess(null);
 
     try {
+      // Llamada REAL al backend de Striga (sin validaciones locales)
       const res = await fetch('/api/withdraw-striga', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -141,15 +98,20 @@ export default function BankWithdrawalPage() {
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Error al procesar el retiro');
-
-      setSuccess(`Retiro iniciado con éxito. Recibirás ${amountEur.toFixed(2)} € en tu cuenta bancaria en 1-2 días hábiles.`);
       
+      // Si Striga o nuestro backend fallan, mostramos el error REAL
+      if (!res.ok) {
+        throw new Error(data.error || 'Striga rechazó la operación.');
+      }
+
+      setSuccess(`Retiro procesado. Striga respondió: ${data.message || 'Pago iniciado correctamente.'}`);
+      
+      // Limpiar formulario
       setAmount("");
       setIban("");
-      setBankName(null);
     } catch (err: any) {
-      setError(err.message || "No se pudo iniciar el retiro. Inténtalo de nuevo.");
+      // Mostramos exactamente el error de Striga
+      setError(err.message);
     } finally {
       setIsProcessing(false);
     }
@@ -161,26 +123,20 @@ export default function BankWithdrawalPage() {
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-3xl">
         
-        {/* CABECERA */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-10 text-center">
           <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-indigo-500/20 text-indigo-400 mb-6 shadow-[0_0_30px_rgba(99,102,241,0.2)]">
             <Landmark size={32} />
           </div>
-          <h1 className="text-3xl md:text-4xl font-bold text-white mb-2 tracking-tight">
-            Retiro por cuenta bancaria
-          </h1>
-          <p className="text-slate-400 text-sm max-w-lg mx-auto">
-            Convierte tus criptomonedas a euros y recíbelos directamente en tu cuenta bancaria vía SEPA.
-          </p>
+          <h1 className="text-3xl md:text-4xl font-bold text-white mb-2 tracking-tight">Retiro por cuenta bancaria</h1>
+          <p className="text-slate-400 text-sm max-w-lg mx-auto">Envía euros a tu banco. La operación se procesará directamente con Striga.</p>
         </motion.div>
 
-        {/* FORMULARIO */}
         <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="rounded-3xl border border-slate-700/50 bg-slate-900/80 p-6 md:p-8 backdrop-blur-xl shadow-2xl relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500 rounded-full blur-[100px] opacity-10 pointer-events-none" />
 
           <div className="relative z-10 space-y-6">
             
-            {/* 1. Selección de Moneda */}
+            {/* 1. Moneda */}
             <div>
               <label className="block text-sm font-medium text-slate-300 mb-2">Moneda a retirar</label>
               <div className="relative">
@@ -189,7 +145,7 @@ export default function BankWithdrawalPage() {
                   value={selectedCoin?.id || ""}
                   className="w-full appearance-none bg-slate-800/80 border border-slate-700 rounded-xl p-4 text-white outline-none focus:border-indigo-500 transition cursor-pointer"
                 >
-                  <option value="" disabled>Selecciona la moneda que quieres vender...</option>
+                  <option value="" disabled>Selecciona la moneda...</option>
                   {coins.filter(c => (coinBalances[c.symbol.toUpperCase()] || 0) > 0).map(c => (
                     <option key={c.id} value={c.id}>
                       {c.symbol.toUpperCase()} - {c.name} ({(coinBalances[c.symbol.toUpperCase()] || 0).toFixed(4)})
@@ -205,14 +161,9 @@ export default function BankWithdrawalPage() {
                   <ArrowRight size={16} className="text-slate-500 rotate-90" />
                 </div>
               </div>
-              {coins.filter(c => (coinBalances[c.symbol.toUpperCase()] || 0) > 0).length === 0 && (
-                <p className="text-xs text-amber-400 mt-2 flex items-center gap-1">
-                  <AlertCircle size={12} /> No tienes saldo en ninguna moneda para retirar.
-                </p>
-              )}
             </div>
 
-            {/* 2. Cantidad en Euros */}
+            {/* 2. Cantidad */}
             <AnimatePresence>
               {selectedCoin && (
                 <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}>
@@ -222,33 +173,19 @@ export default function BankWithdrawalPage() {
                   </div>
                   <div className="relative">
                     <input 
-                      type="number" 
-                      step="any" 
-                      placeholder="0.00" 
-                      value={amount}
+                      type="number" step="any" placeholder="0.00" value={amount}
                       onChange={e => setAmount(e.target.value)}
-                      className={`w-full bg-slate-800/80 border rounded-xl p-4 text-white text-lg font-semibold outline-none focus:border-indigo-500 transition ${
-                        (!isValidAmount && amount) || (!hasEnoughBalance && amount) ? 'border-red-500' : 'border-slate-700'
-                      }`}
+                      className={`w-full bg-slate-800/80 border rounded-xl p-4 text-white text-lg font-semibold outline-none focus:border-indigo-500 transition ${(!isValidAmount && amount) || (!hasEnoughBalance && amount) ? 'border-red-500' : 'border-slate-700'}`}
                     />
                     <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xl">€</span>
                   </div>
-                  
-                  {!isValidAmount && amount && (
-                    <p className="text-xs text-red-400 mt-2 flex items-center gap-1">
-                      <AlertCircle size={12} /> El límite permitido es de 0.10 € a 300 €.
-                    </p>
-                  )}
-                  {!hasEnoughBalance && amount && isValidAmount && (
-                    <p className="text-xs text-red-400 mt-2 flex items-center gap-1">
-                      <AlertCircle size={12} /> Saldo insuficiente. Tienes €{currentBalanceEur.toFixed(2)} disponibles.
-                    </p>
-                  )}
+                  {!isValidAmount && amount && <p className="text-xs text-red-400 mt-2 flex items-center gap-1"><AlertCircle size={12} /> Límite: 0.10 € a 300 €.</p>}
+                  {!hasEnoughBalance && amount && isValidAmount && <p className="text-xs text-red-400 mt-2 flex items-center gap-1"><AlertCircle size={12} /> Saldo insuficiente.</p>}
                 </motion.div>
               )}
             </AnimatePresence>
 
-            {/* 3. IBAN y Detección de Banco */}
+            {/* 3. IBAN */}
             <AnimatePresence>
               {selectedCoin && (
                 <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}>
@@ -258,49 +195,21 @@ export default function BankWithdrawalPage() {
                       type="text" 
                       placeholder="ES91 2100 0418 4502 0005 1332" 
                       value={iban}
-                      onChange={e => validateIban(e.target.value)}
-                      className={`w-full bg-slate-800/80 border rounded-xl p-4 text-white font-mono text-sm outline-none focus:border-indigo-500 transition uppercase ${
-                        (!isValidIban && iban) || ibanError ? 'border-red-500' : 'border-slate-700'
-                      }`}
+                      onChange={e => setIban(e.target.value)}
+                      className="w-full bg-slate-800/80 border border-slate-700 rounded-xl p-4 text-white font-mono text-sm outline-none focus:border-indigo-500 transition uppercase"
                     />
-                    {isValidatingIban && (
-                      <Loader2 className="absolute right-4 top-1/2 -translate-y-1/2 animate-spin text-indigo-400" size={20} />
-                    )}
-                    {isValidIban && !isValidatingIban && (
-                      <CheckCircle2 className="absolute right-4 top-1/2 -translate-y-1/2 text-emerald-400" size={20} />
-                    )}
                   </div>
-                  
-                  {/* Detección de Banco y Errores */}
-                  <AnimatePresence>
-                    {bankName && bankName !== "Banco no identificado" && (
-                      <motion.div 
-                        initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-                        className="mt-3 flex items-center gap-2 text-emerald-400 text-sm bg-emerald-500/10 p-3 rounded-lg border border-emerald-500/20"
-                      >
-                        <Building2 size={16} />
-                        <span>Banco detectado: <strong>{bankName}</strong></span>
-                      </motion.div>
-                    )}
-                    {ibanError && (
-                      <motion.p 
-                        initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                        className="text-xs text-red-400 mt-2 flex items-center gap-1"
-                      >
-                        <AlertCircle size={12} /> {ibanError}
-                      </motion.p>
-                    )}
-                  </AnimatePresence>
+                  <p className="text-[10px] text-slate-500 mt-2">El IBAN será validado directamente por Striga al procesar el pago.</p>
                 </motion.div>
               )}
             </AnimatePresence>
 
-            {/* 4. Feedback de Error / Éxito del Retiro */}
+            {/* Feedback */}
             <AnimatePresence>
               {error && (
                 <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 bg-red-500/10 text-red-400 text-sm rounded-xl flex items-start gap-3 border border-red-500/20">
                   <AlertCircle size={18} className="flex-shrink-0 mt-0.5" />
-                  <p>{error}</p>
+                  <p><strong>Error de Striga:</strong> {error}</p>
                 </motion.div>
               )}
               {success && (
@@ -311,26 +220,18 @@ export default function BankWithdrawalPage() {
               )}
             </AnimatePresence>
 
-            {/* 5. Botón de Confirmar */}
+            {/* Botón */}
             <button
               onClick={handleWithdraw}
-              disabled={isProcessing || !selectedCoin || !isValidAmount || !hasEnoughBalance || !isValidIban}
+              disabled={isProcessing || !canSubmit}
               className="w-full mt-6 bg-gradient-to-r from-indigo-500 to-cyan-400 p-4 rounded-xl text-white font-bold text-lg shadow-lg shadow-indigo-500/25 transition hover:scale-[1.02] disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
             >
-              {isProcessing ? (
-                <><Loader2 className="animate-spin" size={20} /> Procesando retiro...</>
-              ) : (
-                <><Landmark size={20} /> Confirmar Retiro a mi Banco</>
-              )}
+              {isProcessing ? <><Loader2 className="animate-spin" size={20} /> Contactando con Striga...</> : <><Landmark size={20} /> Confirmar Retiro</>}
             </button>
 
-            {/* 6. Nota Legal al pie */}
             <div className="mt-6 flex items-start justify-center gap-2 text-xs text-slate-500 text-center">
               <Info size={14} className="mt-0.5 flex-shrink-0" />
-              <p>
-                Los retiros se procesan vía transferencia SEPA a través de nuestra red de pagos segura. 
-                El dinero llegará a tu cuenta en 1-2 días hábiles. Asegúrate de que el IBAN está a tu nombre.
-              </p>
+              <p>Si Striga rechaza la operación, verás el mensaje de error real justo arriba.</p>
             </div>
 
           </div>
