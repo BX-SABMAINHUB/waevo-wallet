@@ -88,18 +88,21 @@ export default function BankWithdrawalPage() {
       if (!res.ok) throw new Error(data.error || 'Error obteniendo token KYC');
 
       // Inicializar SumSub con el token de Striga
+      // ✅ CORRECCIÓN: onMessage ya NO va dentro de withConf.
       const snsWebSdkInstance = snsWebSdk
         .init(data.token, () => Promise.resolve(data.token))
         .withConf({
           lang: 'es',
-          onMessage: (type: string, payload: any) => {
-            console.log('SumSub Event:', type, payload);
-            if (type === 'idCheck.onApplicantStatusChanged' && payload.reviewStatus === 'completed') {
-              alert('¡Verificación completada! Ya puedes retirar.');
-              setShowKyc(false);
-              setError(null);
-            }
-          },
+        })
+        .onMessage((type: string, payload: any) => {
+          console.log('SumSub Event:', type, payload);
+          // En WebSDK 2.0 el evento se llama onApplicantStatusChanged,
+          // pero los mensajes llegan con el prefijo idCheck.
+          if (type === 'idCheck.onApplicantStatusChanged' && payload.reviewStatus === 'completed') {
+            alert('¡Verificación completada! Ya puedes retirar.');
+            setShowKyc(false);
+            setError(null);
+          }
         })
         .build();
 
