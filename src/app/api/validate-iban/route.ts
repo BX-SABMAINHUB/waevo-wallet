@@ -9,28 +9,34 @@ export async function POST(request: Request) {
       return NextResponse.json({ valid: false, bankName: null, error: 'IBAN demasiado corto' });
     }
 
-    // Llamada a Strale sin API Key
+    // Llamada a Strale (gratuita y sin API Key)
     const res = await fetch('https://api.strale.io/v1/do', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task: 'iban-validate', iban: cleanIban }),
+      body: JSON.stringify({
+        capability_slug: 'iban-validate',
+        inputs: { iban: cleanIban },
+      }),
     });
 
-    const data = await res.json();
-
     if (!res.ok) {
-      console.error('❌ Error de Strale:', data);
+      const errorData = await res.text();
+      console.error('❌ Error de Strale:', res.status, errorData);
       return NextResponse.json({ valid: false, bankName: null, error: 'Error en el servicio de validación' }, { status: res.status });
     }
 
-    // La respuesta de Strale puede variar; busca el nombre del banco en 'bank_name' o 'bankName'
-    const bankName = data.bank_name || data.bankName || null;
+    const data = await res.json();
 
-    if (data.valid) {
-      return NextResponse.json({ valid: true, bankName: bankName || "Banco no identificado" });
+    // Strale devuelve los datos dentro de la propiedad 'output'
+    const output = data.output;
+
+    if (output && output.valid) {
+      // Si el IBAN es válido pero no se identifica el banco, lo indicamos
+      const bankName = output.bank_name || 'Banco no identificado';
+      return NextResponse.json({ valid: true, bankName: bankName });
     }
 
-    return NextResponse.json({ valid: false, bankName: null, error: 'IBAN no válido' });
+    return NextResponse.json({ valid: false, bankName: null, error: 'IBAN no válido según Strale' });
 
   } catch (error: any) {
     console.error('🔥 [Error en validate-iban]:', error);
