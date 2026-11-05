@@ -1,17 +1,19 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: [
-    "@solana/kit",
-    "@solana-program/memo",
-    "@solana-program/system",
-    "@solana-program/token",
-  ],
-  webpack: (config) => {
-    config.resolve.alias = {
-      ...config.resolve.alias,
-      "@farcaster/mini-app-solana": false,
-    };
+  // Excluye la librería de gráficos del bundle del servidor (por si acaso)
+  serverExternalPackages: ["lightweight-charts"],
+  
+  webpack: (config, { isServer }) => {
+    // 🔥 SOLUCIÓN: Ignorar módulos de Node.js en el cliente
+    if (!isServer) {
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+        path: false,
+        crypto: false,
+      };
+    }
     return config;
   },
 };
