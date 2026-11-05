@@ -35,22 +35,36 @@ function getStrigaHeaders(method: string, path: string, body: any) {
 export async function POST(request: Request) {
   try {
     const { userId, symbol, amountEur, iban, bic, beneficiaryName } = await request.json();
-    const upperSymbol = symbol?.toUpperCase();
 
-    if (!userId || !upperSymbol || !amountEur || !iban || !bic || !beneficiaryName) {
-      return NextResponse.json({ error: 'Faltan parámetros obligatorios (IBAN, BIC y nombre del titular)' }, { status: 400 });
+    // 1. Comprobar si el usuario ya está verificado en Striga
+    // En un caso real, deberías tener guardado el strigaUserId en Firestore.
+    // Para este ejemplo, usamos el userId de Firebase como si fuera el de Striga.
+    const strigaUserId = userId; // ⚠️ Esto debe ser el ID real de Striga
+    
+    // Consultar el estado del KYC en Striga
+    const kycStatus = await getKycStatus(strigaUserId);
+
+    if (!kycStatus.approved) {
+      // Si no está aprobado, devolvemos un error que el frontend usará para abrir el KYC
+      return NextResponse.json({ 
+        error: 'KYC_REQUIRED', 
+        message: 'Necesitas completar la verificación de identidad antes de retirar.',
+        kycUrl: kycStatus.kycUrl // URL del SDK de SumSub
+      }, { status: 403 });
     }
 
+    // 2. Si está verificado, obtener la cuenta EUR (sourceAccountId)
+    const sourceAccountId = await getEurAccountId(strigaUserId);
+
+    // 3. Verificar saldo en Firebase
     const db = admin.firestore();
-    
-    // 1. Verificar saldo en Firebase
-    const balanceRef = db.collection('users').doc(userId).collection('balances').doc(upperSymbol);
+    const balanceRef = db.collection('users').doc(userId).collection('balances').doc(symbol.toUpperCase());
     const balanceDoc = await balanceRef.get();
     const currentBalance = balanceDoc.exists ? (balanceDoc.data()?.amount || 0) : 0;
 
-    const priceRes = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${getCoinGeckoId(upperSymbol)}&vs_currencies=eur`);
+    const priceRes = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${getCoinGeckoId(symbol.toUpperCase())}&vs_currencies=eur`);
     const priceData = await priceRes.json();
-    const priceEur = priceData[getCoinGeckoId(upperSymbol)]?.eur;
+    const priceEur = priceData[getCoinGeckoId(symbol.toUpperCase())]?.eur;
 
     if (!priceEur) throw new Error('No se pudo obtener el precio de la moneda.');
 
@@ -59,18 +73,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Saldo insuficiente en tu cuenta.' }, { status: 400 });
     }
 
-    // 2. Crear u obtener el usuario en Striga
-    const strigaUserId = await getOrCreateStrigaUser(userId, beneficiaryName);
-
-    // 3. Obtener la cuenta EUR del usuario (sourceAccountId)
-    const sourceAccountId = await getEurAccountId(strigaUserId);
-
-    // 4. Iniciar el payout
+    // 4. Ejecutar el retiro con los datos bancarios
     const path = '/wallets/send/initiate/bank';
     const body = {
       userId: strigaUserId,
       sourceAccountId: sourceAccountId,
-      amount: Math.round(amountEur * 100), // en céntimos
+      amount: Math.round(amountEur * 100),
       currency: 'EUR',
       destination: {
         iban: iban.replace(/\s+/g, '').toUpperCase(),
@@ -78,8 +86,6 @@ export async function POST(request: Request) {
         name: beneficiaryName,
       },
     };
-
-    console.log(`[Striga] Iniciando payout para usuario ${strigaUserId}`, body);
 
     const headers = getStrigaHeaders('POST', path, body);
     const strigaRes = await fetch(`${STRIGA_BASE_URL}${path}`, {
@@ -91,7 +97,6 @@ export async function POST(request: Request) {
     const strigaData = await strigaRes.json();
 
     if (!strigaRes.ok) {
-      console.error('[Striga Error]', strigaData);
       return NextResponse.json({ 
         error: strigaData.message || JSON.stringify(strigaData) 
       }, { status: strigaRes.status });
@@ -116,18 +121,16 @@ export async function POST(request: Request) {
 }
 
 // Funciones auxiliares (simuladas para el ejemplo)
-async function getOrCreateStrigaUser(firebaseUid: string, name: string): Promise<string> {
-  // En producción, aquí buscarías en Firestore si ya tienes un strigaUserId guardado.
-  // Si no existe, llamarías a POST /user/create de Striga y guardarías el ID.
-  // Para este ejemplo, devolvemos el UID de Firebase como si fuera el de Striga.
-  // ⚠️ ESTO FALLARÁ HASTA QUE IMPLEMENTES LA CREACIÓN REAL DE USUARIO.
-  return firebaseUid; 
+async function getKycStatus(userId: string): Promise<{ approved: boolean; kycUrl?: string }> {
+  // En producción, llamarías a GET /kyc/{userId} de Striga.
+  // Si el estado no es "APPROVED", devolverías la URL del SDK de SumSub.
+  // Para este ejemplo, simulamos que NO está aprobado.
+  return { approved: false, kycUrl: 'https://sumsub.com/...' };
 }
 
-async function getEurAccountId(strigaUserId: string): Promise<string> {
-  // Aquí deberías llamar a GET /wallets para obtener las cuentas del usuario
-  // y devolver el ID de la cuenta en EUR.
-  // ⚠️ ESTO FALLARÁ HASTA QUE IMPLEMENTES LA OBTENCIÓN REAL DE LA CUENTA.
+async function getEurAccountId(userId: string): Promise<string> {
+  // En producción, llamarías a GET /wallets de Striga para obtener las cuentas.
+  // Devolverías el ID de la cuenta en EUR.
   return 'account_eur_placeholder';
 }
 
