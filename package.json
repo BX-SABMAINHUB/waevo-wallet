@@ -17,6 +17,7 @@
     "@solana-program/system": "0.12.0",
     "@solana-program/token": "0.12.0",
     "@solana/kit": "6.10.0",
+    "@sumsub/websdk": "^2.9.0",
     "bitcoinjs-lib": "^6.1.7",
     "ecpair": "^2.1.0",
     "firebase": "^11.1.0",
