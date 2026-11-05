@@ -69,7 +69,7 @@ export default function BankWithdrawalPage() {
     return () => unsubscribe();
   }, [uid]);
 
-  // 3. Validación de IBAN a través de la API interna
+  // 3. Validación de IBAN a través de la API interna (que usa Strale)
   const validateIban = async (value: string) => {
     const cleanIban = value.replace(/\s+/g, '').toUpperCase();
     setIban(value); 
