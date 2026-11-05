@@ -7,7 +7,7 @@ import { collection, onSnapshot } from "firebase/firestore";
 import { db, auth } from "@/lib/firebase";
 import { 
   Landmark, Loader2, AlertCircle, CheckCircle2, 
-  Info, Wallet, ArrowRight
+  Info, Wallet, ArrowRight, ShieldCheck
 } from "lucide-react";
 
 interface Coin { 
@@ -28,54 +28,49 @@ export default function BankWithdrawalPage() {
   const [selectedCoin, setSelectedCoin] = useState<Coin | null>(null);
   const [amount, setAmount] = useState("");
   const [iban, setIban] = useState("");
+  const [bic, setBic] = useState("");
+  const [beneficiaryName, setBeneficiaryName] = useState("");
   
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [kycUrl, setKycUrl] = useState<string | null>(null);
 
   const uid = auth.currentUser?.uid || "";
 
-  // 1. Cargar precios
+  // Cargar precios y saldos (igual que antes)
   useEffect(() => {
     async function fetchCoins() {
       try {
         const res = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=eur&order=market_cap_desc&per_page=100&page=1&sparkline=false");
         const data = await res.json();
         setCoins(data);
-        
         const prices: Record<string, number> = {};
         data.forEach((c: Coin) => { prices[c.symbol.toUpperCase()] = c.current_price; });
         setLivePrices(prices);
-      } catch (error) { 
-        console.error("Error fetching coins:", error); 
-      }
+      } catch (error) { console.error("Error fetching coins:", error); }
     }
     fetchCoins();
   }, []);
 
-  // 2. Escuchar saldos
   useEffect(() => {
     if (!uid) return;
     const unsubscribe = onSnapshot(collection(db, "users", uid, "balances"), (snapshot) => {
       const balances: Record<string, number> = {};
-      snapshot.forEach((doc) => { 
-        if (doc.data().amount) balances[doc.id] = doc.data().amount; 
-      });
+      snapshot.forEach((doc) => { if (doc.data().amount) balances[doc.id] = doc.data().amount; });
       setCoinBalances(balances);
     });
     return () => unsubscribe();
   }, [uid]);
 
-  // Cálculos de saldo
   const selectedPrice = selectedCoin ? (livePrices[selectedCoin.symbol.toUpperCase()] || 0) : 0;
   const amountEur = parseFloat(amount) || 0;
   const currentBalance = selectedCoin ? (coinBalances[selectedCoin.symbol.toUpperCase()] || 0) : 0;
   const currentBalanceEur = currentBalance * selectedPrice;
 
-  // Solo comprobamos que haya datos, el límite de 0.10 a 300 y que haya saldo
   const isValidAmount = amountEur >= 0.10 && amountEur <= 300;
   const hasEnoughBalance = amountEur <= currentBalanceEur;
-  const canSubmit = selectedCoin && amount && iban.length > 10 && isValidAmount && hasEnoughBalance;
+  const canSubmit = selectedCoin && amount && iban && bic && beneficiaryName && isValidAmount && hasEnoughBalance;
 
   const handleWithdraw = async () => {
     if (!canSubmit) return;
@@ -83,9 +78,9 @@ export default function BankWithdrawalPage() {
     setIsProcessing(true);
     setError(null);
     setSuccess(null);
+    setKycUrl(null);
 
     try {
-      // Llamada REAL al backend de Striga (sin validaciones locales)
       const res = await fetch('/api/withdraw-striga', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -94,24 +89,30 @@ export default function BankWithdrawalPage() {
           symbol: selectedCoin.symbol.toUpperCase(),
           amountEur: amountEur,
           iban: iban.replace(/\s+/g, '').toUpperCase(),
+          bic: bic.toUpperCase(),
+          beneficiaryName: beneficiaryName,
         }),
       });
 
       const data = await res.json();
       
-      // Si Striga o nuestro backend fallan, mostramos el error REAL
       if (!res.ok) {
-        throw new Error(data.error || 'Striga rechazó la operación.');
+        // Si el backend dice que se requiere KYC, mostramos el botón
+        if (data.error === 'KYC_REQUIRED') {
+          setKycUrl(data.kycUrl);
+          setError(data.message);
+          return;
+        }
+        throw new Error(data.error || 'Error al procesar el retiro');
       }
 
-      setSuccess(`Retiro procesado. Striga respondió: ${data.message || 'Pago iniciado correctamente.'}`);
-      
-      // Limpiar formulario
+      setSuccess(`Retiro iniciado. Striga respondió: ${data.message || 'Pago en proceso.'}`);
       setAmount("");
       setIban("");
+      setBic("");
+      setBeneficiaryName("");
     } catch (err: any) {
-      // Mostramos exactamente el error de Striga
-      setError(err.message);
+      setError(err.message || "No se pudo iniciar el retiro.");
     } finally {
       setIsProcessing(false);
     }
@@ -123,17 +124,17 @@ export default function BankWithdrawalPage() {
     <div className="aurora-bg min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-3xl">
         
+        {/* CABECERA */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-10 text-center">
-          <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-indigo-500/20 text-indigo-400 mb-6 shadow-[0_0_30px_rgba(99,102,241,0.2)]">
+          <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-indigo-500/20 text-indigo-400 mb-6">
             <Landmark size={32} />
           </div>
-          <h1 className="text-3xl md:text-4xl font-bold text-white mb-2 tracking-tight">Retiro por cuenta bancaria</h1>
-          <p className="text-slate-400 text-sm max-w-lg mx-auto">Envía euros a tu banco. La operación se procesará directamente con Striga.</p>
+          <h1 className="text-3xl md:text-4xl font-bold text-white mb-2">Retiro por cuenta bancaria</h1>
+          <p className="text-slate-400 text-sm max-w-lg mx-auto">Verifica tu identidad una sola vez y retira a tu banco cuando quieras.</p>
         </motion.div>
 
+        {/* FORMULARIO */}
         <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="rounded-3xl border border-slate-700/50 bg-slate-900/80 p-6 md:p-8 backdrop-blur-xl shadow-2xl relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500 rounded-full blur-[100px] opacity-10 pointer-events-none" />
-
           <div className="relative z-10 space-y-6">
             
             {/* 1. Moneda */}
@@ -143,7 +144,7 @@ export default function BankWithdrawalPage() {
                 <select 
                   onChange={(e) => setSelectedCoin(coins.find(c => c.id === e.target.value) || null)}
                   value={selectedCoin?.id || ""}
-                  className="w-full appearance-none bg-slate-800/80 border border-slate-700 rounded-xl p-4 text-white outline-none focus:border-indigo-500 transition cursor-pointer"
+                  className="w-full appearance-none bg-slate-800/80 border border-slate-700 rounded-xl p-4 text-white outline-none focus:border-indigo-500 cursor-pointer"
                 >
                   <option value="" disabled>Selecciona la moneda...</option>
                   {coins.filter(c => (coinBalances[c.symbol.toUpperCase()] || 0) > 0).map(c => (
@@ -152,14 +153,8 @@ export default function BankWithdrawalPage() {
                     </option>
                   ))}
                 </select>
-                {selectedCoin ? (
-                  <img src={selectedCoin.image} className="absolute left-4 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full" />
-                ) : (
-                  <Wallet className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={20} />
-                )}
-                <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none">
-                  <ArrowRight size={16} className="text-slate-500 rotate-90" />
-                </div>
+                {selectedCoin ? <img src={selectedCoin.image} className="absolute left-4 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full" /> : <Wallet className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={20} />}
+                <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none"><ArrowRight size={16} className="text-slate-500 rotate-90" /></div>
               </div>
             </div>
 
@@ -172,34 +167,29 @@ export default function BankWithdrawalPage() {
                     <span className="text-indigo-400 font-medium">Disponible: €{currentBalanceEur.toFixed(2)}</span>
                   </div>
                   <div className="relative">
-                    <input 
-                      type="number" step="any" placeholder="0.00" value={amount}
-                      onChange={e => setAmount(e.target.value)}
-                      className={`w-full bg-slate-800/80 border rounded-xl p-4 text-white text-lg font-semibold outline-none focus:border-indigo-500 transition ${(!isValidAmount && amount) || (!hasEnoughBalance && amount) ? 'border-red-500' : 'border-slate-700'}`}
-                    />
+                    <input type="number" step="any" placeholder="0.00" value={amount} onChange={e => setAmount(e.target.value)} className={`w-full bg-slate-800/80 border rounded-xl p-4 text-white text-lg font-semibold outline-none focus:border-indigo-500 ${(!isValidAmount && amount) || (!hasEnoughBalance && amount) ? 'border-red-500' : 'border-slate-700'}`} />
                     <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xl">€</span>
                   </div>
-                  {!isValidAmount && amount && <p className="text-xs text-red-400 mt-2 flex items-center gap-1"><AlertCircle size={12} /> Límite: 0.10 € a 300 €.</p>}
-                  {!hasEnoughBalance && amount && isValidAmount && <p className="text-xs text-red-400 mt-2 flex items-center gap-1"><AlertCircle size={12} /> Saldo insuficiente.</p>}
                 </motion.div>
               )}
             </AnimatePresence>
 
-            {/* 3. IBAN */}
+            {/* 3. Datos bancarios */}
             <AnimatePresence>
               {selectedCoin && (
-                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}>
-                  <label className="block text-sm font-medium text-slate-300 mb-2 mt-4">IBAN de tu cuenta bancaria</label>
-                  <div className="relative">
-                    <input 
-                      type="text" 
-                      placeholder="ES91 2100 0418 4502 0005 1332" 
-                      value={iban}
-                      onChange={e => setIban(e.target.value)}
-                      className="w-full bg-slate-800/80 border border-slate-700 rounded-xl p-4 text-white font-mono text-sm outline-none focus:border-indigo-500 transition uppercase"
-                    />
+                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">IBAN</label>
+                    <input type="text" placeholder="ES91 2100 0418 4502 0005 1332" value={iban} onChange={e => setIban(e.target.value)} className="w-full bg-slate-800/80 border border-slate-700 rounded-xl p-4 text-white font-mono text-sm outline-none focus:border-indigo-500 uppercase" />
                   </div>
-                  <p className="text-[10px] text-slate-500 mt-2">El IBAN será validado directamente por Striga al procesar el pago.</p>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">BIC / SWIFT</label>
+                    <input type="text" placeholder="CAIXESBBXXX" value={bic} onChange={e => setBic(e.target.value)} className="w-full bg-slate-800/80 border border-slate-700 rounded-xl p-4 text-white font-mono text-sm outline-none focus:border-indigo-500 uppercase" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">Nombre del titular</label>
+                    <input type="text" placeholder="Juan Pérez" value={beneficiaryName} onChange={e => setBeneficiaryName(e.target.value)} className="w-full bg-slate-800/80 border border-slate-700 rounded-xl p-4 text-white outline-none focus:border-indigo-500" />
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -207,31 +197,32 @@ export default function BankWithdrawalPage() {
             {/* Feedback */}
             <AnimatePresence>
               {error && (
-                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 bg-red-500/10 text-red-400 text-sm rounded-xl flex items-start gap-3 border border-red-500/20">
-                  <AlertCircle size={18} className="flex-shrink-0 mt-0.5" />
-                  <p><strong>Error de Striga:</strong> {error}</p>
+                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 bg-red-500/10 text-red-400 text-sm rounded-xl flex flex-col gap-3 border border-red-500/20">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle size={18} /> <p>{error}</p>
+                  </div>
+                  {kycUrl && (
+                    <button onClick={() => window.open(kycUrl, '_blank')} className="flex items-center justify-center gap-2 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-2 px-4 rounded-lg transition">
+                      <ShieldCheck size={16} /> Verificar mi identidad ahora
+                    </button>
+                  )}
                 </motion.div>
               )}
               {success && (
                 <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 bg-emerald-500/10 text-emerald-400 text-sm rounded-xl flex items-start gap-3 border border-emerald-500/20">
-                  <CheckCircle2 size={18} className="flex-shrink-0 mt-0.5" />
-                  <p>{success}</p>
+                  <CheckCircle2 size={18} className="flex-shrink-0 mt-0.5" /> <p>{success}</p>
                 </motion.div>
               )}
             </AnimatePresence>
 
             {/* Botón */}
-            <button
-              onClick={handleWithdraw}
-              disabled={isProcessing || !canSubmit}
-              className="w-full mt-6 bg-gradient-to-r from-indigo-500 to-cyan-400 p-4 rounded-xl text-white font-bold text-lg shadow-lg shadow-indigo-500/25 transition hover:scale-[1.02] disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
-            >
-              {isProcessing ? <><Loader2 className="animate-spin" size={20} /> Contactando con Striga...</> : <><Landmark size={20} /> Confirmar Retiro</>}
+            <button onClick={handleWithdraw} disabled={isProcessing || !canSubmit} className="w-full mt-6 bg-gradient-to-r from-indigo-500 to-cyan-400 p-4 rounded-xl text-white font-bold text-lg shadow-lg shadow-indigo-500/25 transition hover:scale-[1.02] disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2">
+              {isProcessing ? <><Loader2 className="animate-spin" size={20} /> Procesando...</> : <><Landmark size={20} /> Confirmar Retiro</>}
             </button>
 
             <div className="mt-6 flex items-start justify-center gap-2 text-xs text-slate-500 text-center">
               <Info size={14} className="mt-0.5 flex-shrink-0" />
-              <p>Si Striga rechaza la operación, verás el mensaje de error real justo arriba.</p>
+              <p>Al pulsar "Confirmar", si no has verificado tu identidad, se te pedirá hacerlo. Es un proceso único y obligatorio por ley.</p>
             </div>
 
           </div>
