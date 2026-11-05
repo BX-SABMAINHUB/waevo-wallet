@@ -10,22 +10,23 @@ import {
   ArrowRightLeft, 
   Settings,
   BookOpen,
-  Landmark // 🔥 Nuevo icono para Vender y Transferir
+  Landmark // 🔥 Icono para Retiro Bancario
 } from "lucide-react";
 
-// Cargamos Privy SOLO en el cliente para evitar errores de SSR (createContext)
+// Cargamos Privy SOLO en el cliente para evitar errores de SSR
 const PrivyWrapper = dynamic(
   () => import("@/lib/privy").then((mod) => mod.PrivyWrapper),
   { ssr: false }
 );
 
-// Menú de navegación lateral completo
+// Menú de navegación lateral actualizado
 const NAV_ITEMS = [
   { name: "Overview", href: "/overview", icon: LayoutDashboard },
   { name: "Explorar", href: "/explore", icon: Compass },
   { name: "Tu Billetera", href: "/wallet", icon: Wallet },
   { name: "Exchange y Cambios", href: "/exchange", icon: ArrowRightLeft },
-  { name: "Vender y Transferir", href: "/sell-and-transfer", icon: Landmark }, // 🔥 Nueva sección
+  { name: "Vender y Transferir", href: "/sell-and-transfer", icon: Landmark },
+  { name: "Retiro Bancario", href: "/bank-withdrawal", icon: Landmark }, // 🔥 Nueva Sección
   { name: "Información y Documentación", href: "/documentation", icon: BookOpen },
   { name: "Ajustes", href: "/settings", icon: Settings },
 ];
