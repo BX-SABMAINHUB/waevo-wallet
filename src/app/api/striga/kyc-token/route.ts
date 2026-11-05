@@ -12,7 +12,7 @@ function getStrigaHeaders(method: string, path: string, body: string) {
   const contentHash = crypto.createHash('md5').update(body).digest('hex');
   const signatureRaw = time + method + path + contentHash;
   const signature = crypto.createHmac('sha256', API_SECRET).update(signatureRaw).digest('hex');
-  
+
   return {
     'api-key': API_KEY,
     'Authorization': `HMAC ${time}:${signature}`,
@@ -27,7 +27,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'userId es obligatorio' }, { status: 400 });
     }
 
-    const path = '/kyc/start';
+    // ✅ CORRECCIÓN: La ruta correcta para iniciar KYC de un usuario es /user/kyc/start
+    const path = '/user/kyc/start';
     const body = JSON.stringify({ userId });
 
     const headers = getStrigaHeaders('POST', path, body);
@@ -40,13 +41,25 @@ export async function POST(request: Request) {
       body,
     });
 
+    // --- MEJORA: Verificar que la respuesta sea JSON antes de parsear ---
+    const contentType = strigaRes.headers.get('content-type');
+    if (!contentType || !contentType.includes('application/json')) {
+      const text = await strigaRes.text();
+      console.error('❌ [Striga KYC] Respuesta no JSON:', text.slice(0, 200));
+      return NextResponse.json(
+        { error: `Error de Striga (${strigaRes.status}): la respuesta no es JSON.` },
+        { status: 502 }
+      );
+    }
+
     const strigaData = await strigaRes.json();
 
     if (!strigaRes.ok) {
       console.error('❌ [Striga KYC Error]', strigaData);
-      return NextResponse.json({ 
-        error: strigaData.message || 'Error al iniciar el KYC en Striga' 
-      }, { status: strigaRes.status });
+      return NextResponse.json(
+        { error: strigaData.message || 'Error al iniciar el KYC en Striga' },
+        { status: strigaRes.status }
+      );
     }
 
     // Striga devuelve un token de SumSub de corta duración
