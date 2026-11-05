@@ -14,12 +14,10 @@ if (!admin.apps.length) {
   }
 }
 
-// ⚠️ Asegúrate de tener esto en tus variables de entorno
-const STRIGA_BASE_URL = 'https://www.sandbox.striga.com/api/v1'; // O producción si ya tienes acceso
+const STRIGA_BASE_URL = 'https://www.sandbox.striga.com/api/v1';
 const API_KEY = process.env.STRIGA_API_KEY!;
 const API_SECRET = process.env.STRIGA_API_SECRET!;
 
-// Función HMAC que Striga exige
 function getStrigaHeaders(method: string, path: string, body: any) {
   const time = Date.now().toString();
   const bodyString = JSON.stringify(body);
@@ -36,11 +34,11 @@ function getStrigaHeaders(method: string, path: string, body: any) {
 
 export async function POST(request: Request) {
   try {
-    const { userId, symbol, amountEur, iban } = await request.json();
+    const { userId, symbol, amountEur, iban, bic, beneficiaryName } = await request.json();
     const upperSymbol = symbol?.toUpperCase();
 
-    if (!userId || !upperSymbol || !amountEur || !iban) {
-      return NextResponse.json({ error: 'Faltan parámetros obligatorios' }, { status: 400 });
+    if (!userId || !upperSymbol || !amountEur || !iban || !bic || !beneficiaryName) {
+      return NextResponse.json({ error: 'Faltan parámetros obligatorios (IBAN, BIC y nombre del titular)' }, { status: 400 });
     }
 
     const db = admin.firestore();
@@ -61,24 +59,29 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Saldo insuficiente en tu cuenta.' }, { status: 400 });
     }
 
-    // 2. Llamada REAL a Striga
+    // 2. Crear u obtener el usuario en Striga
+    const strigaUserId = await getOrCreateStrigaUser(userId, beneficiaryName);
+
+    // 3. Obtener la cuenta EUR del usuario (sourceAccountId)
+    const sourceAccountId = await getEurAccountId(strigaUserId);
+
+    // 4. Iniciar el payout
     const path = '/wallets/send/initiate/bank';
-    
-    // ⚠️ NOTA: Striga requiere un "walletId" real de una cuenta creada previamente.
-    // Como aún no hemos creado la cuenta del usuario en Striga, usaremos un ID de prueba
-    // o el que tengas configurado. Si no existe, Striga devolverá un error real.
     const body = {
-      walletId: `wallet_${userId}_eur`, 
-      amount: Math.round(amountEur * 100), // Striga usa céntimos
+      userId: strigaUserId,
+      sourceAccountId: sourceAccountId,
+      amount: Math.round(amountEur * 100), // en céntimos
       currency: 'EUR',
-      destinationIban: iban.replace(/\s+/g, '').toUpperCase(),
-      reference: `Waevo Retiro ${Date.now()}`,
+      destination: {
+        iban: iban.replace(/\s+/g, '').toUpperCase(),
+        bic: bic.toUpperCase(),
+        name: beneficiaryName,
+      },
     };
 
-    console.log(`[Striga] Enviando petición a ${path}`, body);
+    console.log(`[Striga] Iniciando payout para usuario ${strigaUserId}`, body);
 
     const headers = getStrigaHeaders('POST', path, body);
-
     const strigaRes = await fetch(`${STRIGA_BASE_URL}${path}`, {
       method: 'POST',
       headers,
@@ -87,7 +90,6 @@ export async function POST(request: Request) {
 
     const strigaData = await strigaRes.json();
 
-    // Si Striga devuelve error, lo mostramos tal cual
     if (!strigaRes.ok) {
       console.error('[Striga Error]', strigaData);
       return NextResponse.json({ 
@@ -95,7 +97,7 @@ export async function POST(request: Request) {
       }, { status: strigaRes.status });
     }
 
-    // 3. Si Striga acepta, descontamos el saldo en Firebase
+    // 5. Descontar saldo en Firebase
     await db.runTransaction(async (t) => {
       const doc = await t.get(balanceRef);
       const balance = doc.exists ? doc.data()?.amount || 0 : 0;
@@ -111,6 +113,22 @@ export async function POST(request: Request) {
     console.error('🔥 [Error en withdraw-striga]:', error);
     return NextResponse.json({ error: error.message || 'Error interno' }, { status: 500 });
   }
+}
+
+// Funciones auxiliares (simuladas para el ejemplo)
+async function getOrCreateStrigaUser(firebaseUid: string, name: string): Promise<string> {
+  // En producción, aquí buscarías en Firestore si ya tienes un strigaUserId guardado.
+  // Si no existe, llamarías a POST /user/create de Striga y guardarías el ID.
+  // Para este ejemplo, devolvemos el UID de Firebase como si fuera el de Striga.
+  // ⚠️ ESTO FALLARÁ HASTA QUE IMPLEMENTES LA CREACIÓN REAL DE USUARIO.
+  return firebaseUid; 
+}
+
+async function getEurAccountId(strigaUserId: string): Promise<string> {
+  // Aquí deberías llamar a GET /wallets para obtener las cuentas del usuario
+  // y devolver el ID de la cuenta en EUR.
+  // ⚠️ ESTO FALLARÁ HASTA QUE IMPLEMENTES LA OBTENCIÓN REAL DE LA CUENTA.
+  return 'account_eur_placeholder';
 }
 
 function getCoinGeckoId(symbol: string): string {
