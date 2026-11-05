@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import { identifyBank, isValidIBAN } from 'iban-bank-identifier';
 
 export async function POST(request: Request) {
   try {
@@ -10,22 +9,31 @@ export async function POST(request: Request) {
       return NextResponse.json({ valid: false, bankName: null, error: 'IBAN demasiado corto' });
     }
 
-    // 1. Validar que el IBAN sea matemáticamente correcto
-    if (!isValidIBAN(cleanIban)) {
-      return NextResponse.json({ valid: false, bankName: null, error: 'IBAN no válido' });
+    // Llamada a Strale sin API Key
+    const res = await fetch('https://api.strale.io/v1/do', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 'iban-validate', iban: cleanIban }),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      console.error('❌ Error de Strale:', data);
+      return NextResponse.json({ valid: false, bankName: null, error: 'Error en el servicio de validación' }, { status: res.status });
     }
 
-    // 2. Identificar el banco usando la base de datos offline
-    const result = identifyBank(cleanIban);
-    
-    if (result.valid && result.bank?.name) {
-      return NextResponse.json({ valid: true, bankName: result.bank.name });
-    } else {
-      return NextResponse.json({ valid: true, bankName: "Banco no identificado" });
+    // La respuesta de Strale puede variar; busca el nombre del banco en 'bank_name' o 'bankName'
+    const bankName = data.bank_name || data.bankName || null;
+
+    if (data.valid) {
+      return NextResponse.json({ valid: true, bankName: bankName || "Banco no identificado" });
     }
+
+    return NextResponse.json({ valid: false, bankName: null, error: 'IBAN no válido' });
 
   } catch (error: any) {
     console.error('🔥 [Error en validate-iban]:', error);
-    return NextResponse.json({ valid: false, bankName: null, error: 'Error interno validando el IBAN' }, { status: 500 });
+    return NextResponse.json({ valid: false, bankName: null, error: error.message }, { status: 500 });
   }
 }
