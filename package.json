@@ -12,7 +12,6 @@
   "dependencies": {
     "@bitcoinerlab/secp256k1": "^1.2.0",
     "@emailjs/nodejs": "^4.0.0",
-    "@hypermid/sdk": "^3.0.1",
     "@privy-io/react-auth": "^3.51.0",
     "@solana-program/memo": "0.11.0",
     "@solana-program/system": "0.12.0",
