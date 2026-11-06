@@ -136,7 +136,7 @@ export default function ExchangePage() {
         throw new Error(data.error || "Error al intercambiar");
       }
 
-      // Mostramos el mensaje y, si existe, el orderId de SwapTitan
+      // Mostramos el mensaje y, si existe, el orderId de Hypermid
       setSuccess(`${data.message}${data.orderId ? ` (Orden: ${data.orderId})` : ''}`);
       setAmount("");
       setFromCoin(null);
@@ -328,12 +328,12 @@ export default function ExchangePage() {
             <p className="text-center">
               Los intercambios son procesados de forma segura por{" "}
               <a
-                href="https://swaptitan.net"
+                href="https://hypermid.io"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-indigo-400 hover:underline"
               >
-                SwapTitan
+                Hypermid
               </a>
               .
             </p>
