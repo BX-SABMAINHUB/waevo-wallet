@@ -1,3 +1,4 @@
+// src/app/(dashboard)/layout.tsx
 "use client";
 
 import dynamic from "next/dynamic";
@@ -10,8 +11,7 @@ import {
   ArrowRightLeft, 
   Landmark, 
   BookOpen, 
-  Settings,
-  Banknote
+  Settings
 } from "lucide-react";
 
 // Cargamos Privy SOLO en el cliente para evitar errores de SSR
@@ -26,7 +26,6 @@ const NAV_ITEMS = [
   { name: "Explorar", href: "/explore", icon: Compass },
   { name: "Tu Billetera", href: "/wallet", icon: Wallet },
   { name: "Exchange y Cambios", href: "/exchange", icon: ArrowRightLeft },
-  { name: "Vender y Transferir", href: "/sell-and-transfer", icon: Banknote },
   { name: "Retiro Bancario", href: "/bank-withdrawal", icon: Landmark },
   { name: "Información y Documentación", href: "/documentation", icon: BookOpen },
   { name: "Ajustes", href: "/settings", icon: Settings },
