@@ -132,11 +132,18 @@ export default function ExchangePage() {
       }
 
       const data = await res.json();
+      
       if (!res.ok) {
-        throw new Error(data.error || "Error al intercambiar");
+        // 🔥 BLINDAJE: Evitar que un objeto se muestre como "[object Object]"
+        let errorMsg = "Error al intercambiar";
+        if (typeof data.error === 'string') {
+          errorMsg = data.error;
+        } else if (data.error) {
+          errorMsg = JSON.stringify(data.error);
+        }
+        throw new Error(errorMsg);
       }
 
-      // Mostramos el mensaje y, si existe, el orderId de Hypermid
       setSuccess(`${data.message}${data.orderId ? ` (Orden: ${data.orderId})` : ''}`);
       setAmount("");
       setFromCoin(null);
