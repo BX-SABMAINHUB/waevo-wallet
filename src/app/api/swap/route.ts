@@ -12,7 +12,7 @@ export const dynamic = 'force-dynamic';
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
 
-// --- Inicialización de Firebase Admin (sin cambios) ---
+// --- Inicialización de Firebase Admin ---
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
@@ -88,7 +88,6 @@ export async function POST(request: Request) {
     }
 
     // --- 3. Obtener los IDs de cadena de Hypermid dinámicamente ---
-    // Casteamos la respuesta a 'any' para evitar problemas de tipado con la librería
     const chainsResponse: any = await hm.getChains();
     const chainsList = Array.isArray(chainsResponse) ? chainsResponse : (chainsResponse.chains || []);
 
@@ -96,7 +95,6 @@ export async function POST(request: Request) {
       throw new Error('Hypermid devolvió un formato de cadenas inesperado.');
     }
 
-    // Buscamos la cadena de origen y destino extrayendo el símbolo del objeto nativo
     const fromChainInfo: any = chainsList.find((c: any) => {
       const symbol = (c?.native as any)?.symbol || c?.symbol || c?.ticker;
       return symbol && symbol.toUpperCase() === upperFrom;
@@ -118,12 +116,10 @@ export async function POST(request: Request) {
     const toChainId = toChainInfo.chainId || toChainInfo.id;
 
     // --- 4. Convertir la cantidad a unidades base (satoshis para BTC/LTC) ---
-    // Hacemos un cast a 'any' de la propiedad 'native' para solucionar el error de compilación
     const nativeInfo = fromChainInfo.native as any;
     const decimals = nativeInfo?.decimals || 8;
     const amountInBaseUnits = BigInt(Math.round(parseFloat(amount) * Math.pow(10, decimals))).toString();
 
-    // Los tokens nativos suelen representarse con la dirección "native"
     const fromTokenAddress = "native";
     const toTokenAddress = "native";
 
@@ -139,16 +135,25 @@ export async function POST(request: Request) {
       toAddress: toAddress,
     });
 
-    if (!quote || !quote.id) {
+    if (!quote) {
       throw new Error('Hypermid no devolvió una cotización válida.');
     }
 
+    // ✅ CORRECCIÓN: el tipo SwapQuote de la versión 3.x no declara `id`.
+    // Extraemos el identificador mediante un cast seguro a `any`,
+    // buscando tanto `id` como `quoteId` para cubrir ambas versiones del SDK.
+    const quoteId = (quote as any).id ?? (quote as any).quoteId;
+
+    if (!quoteId) {
+      throw new Error('Hypermid no devolvió un identificador de cotización (id/quoteId).');
+    }
+
     // --- 6. Ejecutar el swap en Hypermid ---
-    console.log(`[Hypermid] Ejecutando cotización ${quote.id}...`);
-    const exec = await hm.execute({ quoteId: quote.id });
+    console.log(`[Hypermid] Ejecutando cotización ${quoteId}...`);
+    const exec = await hm.execute({ quoteId });
 
     const depositAddress = exec.depositAddress;
-    const expectedReceive = exec.toAmount || quote.toAmount;
+    const expectedReceive = exec.toAmount || (quote as any).toAmount;
 
     if (!depositAddress) {
       throw new Error('Hypermid no devolvió una dirección de depósito (depositAddress). Es posible que esta ruta requiera una transacción EVM.');
@@ -231,7 +236,7 @@ export async function POST(request: Request) {
       success: true,
       message: `Intercambio iniciado. Enviaste ${amount} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
       txHash: finalTx.tx?.hash,
-      orderId: quote.id,
+      orderId: quoteId,
     });
 
   } catch (error: any) {
