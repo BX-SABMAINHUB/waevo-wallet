@@ -1,8 +1,10 @@
+// next.config.ts
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Excluye la librería de gráficos del bundle del servidor (por si acaso)
-  serverExternalPackages: ["lightweight-charts"],
+  // Paquetes que Next.js NO debe empaquetar y debe cargar desde node_modules en el servidor.
+  // Incluimos el SDK de Hypermid para evitar el error "Cannot find module '@hypermid/sdk'" en runtime.
+  serverExternalPackages: ["lightweight-charts", "@hypermid/sdk"],
   
   webpack: (config, { isServer }) => {
     // 🔥 SOLUCIÓN: Ignorar módulos de Node.js en el cliente
