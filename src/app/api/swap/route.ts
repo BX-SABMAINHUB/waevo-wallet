@@ -83,8 +83,7 @@ export async function POST(request: Request) {
       await toWalletRef.set({ address: toAddress, privateKey: genData.private, createdAt: new Date().toISOString() });
     }
 
-    // --- 3. Import dinámico de Hypermid (SOLUCIÓN AL ERROR EN VERCEL) ---
-    // Al hacer el import dentro de la función, evitamos que Next.js lo elimine del bundle.
+    // --- 3. Import dinámico de Hypermid ---
     const hypermidModule = await import('@hypermid/sdk');
     const { Hypermid, quoteSwap } = hypermidModule;
 
@@ -116,20 +115,22 @@ export async function POST(request: Request) {
     const fromChainId = fromChainInfo.chainId || fromChainInfo.id;
     const toChainId = toChainInfo.chainId || toChainInfo.id;
 
-    // --- 4. Convertir la cantidad a unidades base (satoshis para BTC/LTC) ---
+    // --- 4. Convertir la cantidad a unidades base ---
     const nativeInfo = fromChainInfo.native as any;
     const decimals = nativeInfo?.decimals || 8;
     const amountInBaseUnits = BigInt(Math.round(parseFloat(amount) * Math.pow(10, decimals))).toString();
 
-    // --- 5. Construir el objeto SwapQuoteRequest con los nombres correctos ---
+    // --- 5. Construir el SwapQuoteRequest con los campos y formatos correctos ---
+    // tokenIn debe ser una dirección válida de la cadena de origen (Litecoin en este caso).
+    // tokenOut debe ser una dirección válida de la cadena de destino (Bitcoin en este caso).
+    // El campo refundAddress NO debe incluirse.
     const swapRequest = {
       srcChain: fromChainId,
       dstChain: toChainId,
-      tokenIn: "native",
-      tokenOut: "native",
+      tokenIn: fromWallet.address, // Dirección LTC de origen (formato utxo válido)
+      tokenOut: toAddress,         // Dirección BTC de destino (formato utxo válido)
       amountIn: amountInBaseUnits,
       recipient: toAddress,
-      refundAddress: fromWallet.address,
     };
 
     console.log(`[Hypermid] Solicitando cotización con quoteSwap...`);
