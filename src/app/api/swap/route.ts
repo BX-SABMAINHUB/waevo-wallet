@@ -4,7 +4,6 @@ import * as bitcoin from 'bitcoinjs-lib';
 import ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
-import { randomUUID } from 'crypto';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -12,7 +11,7 @@ export const dynamic = 'force-dynamic';
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
 
-// --- Inicialización de Firebase Admin (sin cambios) ---
+// --- Inicialización de Firebase Admin ---
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
@@ -43,37 +42,20 @@ const NETWORKS: Record<string, { blockcypher: string; network: any }> = {
   BTC: { blockcypher: 'btc', network: bitcoin.networks.bitcoin },
 };
 
-// --- Configuración de GhostSwap ---
-const GHOSTSWAP_API_BASE = 'https://partners-api.ghostswap.io';
-const GHOSTSWAP_PUBLIC_KEY = process.env.GHOSTSWAP_PUBLIC_KEY; // gspk_live_...
-const GHOSTSWAP_SECRET = process.env.GHOSTSWAP_SECRET;         // gssk_live_...
+// --- Configuración de LeoDex (LeoKit) ---
+const LEOKIT_API_BASE = 'https://api.leokit.dev';
+// Clave pública universal de LeoDex (no requiere registro)
+const LEOKIT_API_KEY = 'fa57ad8f-880d-4111-86ec-bc32d7e2b4c7';
 
 /**
- * Realiza una petición a la API de GhostSwap.
- * Si se proporcionan credenciales, añade la cabecera Authorization.
- * El endpoint público /v1/quotes no las necesita, pero /v1/swaps sí.
+ * Realiza una petición a la API de LeoKit.
  */
-async function ghostSwapRequest(
-  path: string,
-  method: 'GET' | 'POST' = 'POST',
-  body?: any,
-  requiresAuth: boolean = true
-) {
-  const url = `${GHOSTSWAP_API_BASE}${path}`;
+async function leoKitRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: any) {
+  const url = `${LEOKIT_API_BASE}${path}`;
   const headers: Record<string, string> = {
+    'Api-Key': LEOKIT_API_KEY,
     'Content-Type': 'application/json',
   };
-
-  if (requiresAuth) {
-    if (!GHOSTSWAP_PUBLIC_KEY || !GHOSTSWAP_SECRET) {
-      throw new Error(
-        'Faltan GHOSTSWAP_PUBLIC_KEY y GHOSTSWAP_SECRET en las variables de entorno. ' +
-        'Regístrate en https://partners.ghostswap.io/sign-up para obtenerlas.'
-      );
-    }
-    // GhostSwap espera "Bearer publicKey:secret" (sin base64)
-    headers['Authorization'] = `Bearer ${GHOSTSWAP_PUBLIC_KEY}:${GHOSTSWAP_SECRET}`;
-  }
 
   const options: RequestInit = { method, headers };
   if (body) {
@@ -87,12 +69,17 @@ async function ghostSwapRequest(
   try {
     json = JSON.parse(text);
   } catch {
-    console.error(`[GhostSwap] Respuesta no JSON (HTTP ${res.status}):`, text.substring(0, 300));
-    throw new Error(`GhostSwap devolvió una respuesta inesperada (HTTP ${res.status}).`);
+    console.error(`[LeoKit] Respuesta no JSON (HTTP ${res.status}):`, text.substring(0, 300));
+    throw new Error(`LeoKit devolvió una respuesta inesperada (HTTP ${res.status}).`);
   }
 
   if (!res.ok) {
-    throw new Error(json.message || json.error || `Error ${res.status} en GhostSwap`);
+    const errorMsg = json.error || json.message || `Error ${res.status} en LeoKit`;
+    // Manejo especial para clave inactiva (se puede renovar recargando el archivo de docs)
+    if (res.status === 403 && json.code === 'KEY_INACTIVE') {
+      throw new Error('La clave pública de LeoDex ha caducado. Visita https://leodex.io/swap-api.md para obtener la nueva clave y actualizarla en el código.');
+    }
+    throw new Error(errorMsg);
   }
 
   return json;
@@ -139,62 +126,59 @@ export async function POST(request: Request) {
       await toWalletRef.set({ address: toAddress, privateKey: genData.private, createdAt: new Date().toISOString() });
     }
 
-    // --- 3. Cotización pública (SIN autenticación) ---
-    // El endpoint /v1/quotes es público y devuelve amountTo, min y max.
-    const quotePayload = {
-      from: upperFrom.toLowerCase(),
-      to: upperTo.toLowerCase(),
-      amountFrom: parseFloat(amount).toString(),
+    // --- 3. Obtener cotización de LeoDex ---
+    // LeoDex usa IDs de activo con formato CHAIN.TICKER (ej. BTC.BTC, ETH.ETH)
+    const fromAsset = `${upperFrom}.${upperFrom}`;
+    const toAsset = `${upperTo}.${upperTo}`;
+
+    // Convertir cantidad a string decimal (LeoDex usa strings, no unidades base)
+    const amountStr = parseFloat(amount).toString();
+
+    const quotePath = `/quote-deposit?from_asset=${fromAsset}&to_asset=${toAsset}&amount=${amountStr}&slippage_bps=300`;
+    console.log(`[LeoDex] Solicitando cotización: ${quotePath}`);
+    const quoteData = await leoKitRequest(quotePath, 'GET');
+
+    // Extraer la mejor cotización (la que tiene smart_recommended: true)
+    const quotes = quoteData.quotes || [];
+    const bestQuote = quotes.find((q: any) => q.smart_recommended === true) || quotes[0];
+
+    if (!bestQuote) {
+      throw new Error('LeoDex no devolvió ninguna cotización para este par.');
+    }
+
+    const quoteId = quoteData.quote_id;
+    const expectedAmountOut = bestQuote.data?.expected_amount_out;
+    const outAssetDecimal = bestQuote.data?.out_asset_decimal || 8;
+
+    if (!quoteId) {
+      throw new Error('LeoDex no devolvió un ID de cotización válido.');
+    }
+
+    // La cantidad esperada a recibir viene en la unidad más pequeña; la convertimos
+    const expectedReceive = expectedAmountOut ? parseInt(expectedAmountOut) / Math.pow(10, outAssetDecimal) : 0;
+
+    // --- 4. Obtener dirección de depósito de LeoDex ---
+    // Necesitamos la dirección de la wallet de origen para posibles reembolsos
+    const depositPayload = {
+      quote_id: quoteId,
+      from_address: fromWallet.address, // Dirección de reembolso en la cadena de origen
+      to_address: toAddress,           // Dirección de recepción en la cadena de destino
     };
 
-    console.log(`[GhostSwap] Solicitando cotización pública...`);
-    const quote = await ghostSwapRequest('/v1/quotes', 'POST', quotePayload, false);
+    console.log(`[LeoDex] Solicitando dirección de depósito para quote ${quoteId}...`);
+    const depositData = await leoKitRequest('/deposit-address', 'POST', depositPayload);
 
-    // La respuesta incluye: amountTo, rate, amountUserReceives, networkFee, min, max
-    const minAmount = parseFloat(quote.min || '0');
-    const maxAmount = parseFloat(quote.max || '0');
-
-    if (minAmount > 0 && parseFloat(amount) < minAmount) {
-      return NextResponse.json({
-        error: `El monto mínimo para este par es ${minAmount} ${upperFrom}.`
-      }, { status: 400 });
-    }
-    if (maxAmount > 0 && parseFloat(amount) > maxAmount) {
-      return NextResponse.json({
-        error: `El monto máximo para este par es ${maxAmount} ${upperFrom}.`
-      }, { status: 400 });
-    }
-
-    const expectedReceive = parseFloat(quote.amountTo || quote.amountUserReceives || '0');
-    if (!expectedReceive) {
-      throw new Error('GhostSwap no devolvió una cantidad estimada a recibir.');
-    }
-
-    // --- 4. Crear el swap (REQUIERE autenticación) ---
-    // Endpoint: POST /v1/swaps. Requiere cabecera Idempotency-Key (UUID v4).
-    const idempotencyKey = randomUUID();
-
-    const swapPayload = {
-      from: upperFrom.toLowerCase(),
-      to: upperTo.toLowerCase(),
-      amountFrom: parseFloat(amount).toString(),
-      payoutAddress: toAddress, // Dirección de destino de los fondos
-      // refundAddress: fromWallet.address, // Opcional para float, recomendado
-    };
-
-    console.log(`[GhostSwap] Creando swap con Idempotency-Key: ${idempotencyKey}`);
-    const swapData = await ghostSwapRequest('/v1/swaps', 'POST', swapPayload, true, idempotencyKey);
-
-    // La respuesta de /v1/swaps incluye payinAddress (dirección de depósito) e id
-    const depositAddress = swapData.payinAddress;
-    const orderId = swapData.id;
+    const depositAddress = depositData.deposit_address;
+    const amountToSend = depositData.amount; // La cantidad exacta que se debe enviar
+    const expiresAt = depositData.expires_at;
 
     if (!depositAddress) {
-      throw new Error('GhostSwap no devolvió una dirección de depósito válida (payinAddress).');
+      throw new Error('LeoDex no devolvió una dirección de depósito válida.');
     }
 
     // --- 5. Construir y firmar la transacción on-chain (envío a la dirección de depósito) ---
-    const amountSatoshi = Math.round(parseFloat(amount) * 1e8);
+    // Usamos la cantidad exacta que indica LeoDex (amountToSend) por si hay variaciones
+    const amountSatoshi = Math.round(parseFloat(amountToSend) * 1e8);
 
     const newTx = {
       inputs: [{ addresses: [fromWallet.address] }],
@@ -244,7 +228,7 @@ export async function POST(request: Request) {
     const finalTx = await sendRes.json();
     if (!sendRes.ok) {
       const errDetail = JSON.stringify(finalTx.errors || finalTx);
-      throw new Error(`Error al enviar a GhostSwap: ${errDetail}`);
+      throw new Error(`Error al enviar a LeoDex: ${errDetail}`);
     }
 
     // --- 8. Actualizar saldos en Firestore (transacción atómica) ---
@@ -268,13 +252,14 @@ export async function POST(request: Request) {
     // --- 9. Respuesta exitosa ---
     return NextResponse.json({
       success: true,
-      message: `Intercambio en proceso. Enviaste ${amount} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
+      message: `Intercambio iniciado. Enviaste ${amount} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}. La transacción está siendo procesada por la red.`,
       txHash: finalTx.tx?.hash,
-      orderId: orderId,
+      orderId: quoteId,
+      expiresAt: expiresAt,
     });
 
   } catch (error: any) {
-    console.error('🔥 [Error en swap con GhostSwap]:', error);
+    console.error('🔥 [Error en swap con LeoDex]:', error);
     return NextResponse.json({ error: error.message || 'Error interno' }, { status: 500 });
   }
 }
