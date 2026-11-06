@@ -4,7 +4,6 @@ import * as bitcoin from 'bitcoinjs-lib';
 import ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
-import { quoteSwap } from '@hypermid/sdk';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -84,9 +83,13 @@ export async function POST(request: Request) {
       await toWalletRef.set({ address: toAddress, privateKey: genData.private, createdAt: new Date().toISOString() });
     }
 
-    // --- 3. Obtener los IDs de cadena de Hypermid dinámicamente ---
-    const hypermid = new (require('@hypermid/sdk').Hypermid)();
-    const chainsResponse: any = await hypermid.getChains();
+    // --- 3. Import dinámico de Hypermid (SOLUCIÓN AL ERROR EN VERCEL) ---
+    // Al hacer el import dentro de la función, evitamos que Next.js lo elimine del bundle.
+    const hypermidModule = await import('@hypermid/sdk');
+    const { Hypermid, quoteSwap } = hypermidModule;
+
+    const hm = new Hypermid();
+    const chainsResponse: any = await hm.getChains();
     const chainsList = Array.isArray(chainsResponse) ? chainsResponse : (chainsResponse.chains || []);
 
     if (!Array.isArray(chainsList)) {
@@ -122,11 +125,11 @@ export async function POST(request: Request) {
     const swapRequest = {
       srcChain: fromChainId,
       dstChain: toChainId,
-      tokenIn: "native",   // Token nativo (BTC/LTC)
+      tokenIn: "native",
       tokenOut: "native",
       amountIn: amountInBaseUnits,
       recipient: toAddress,
-      refundAddress: fromWallet.address, // Opcional pero recomendado
+      refundAddress: fromWallet.address,
     };
 
     console.log(`[Hypermid] Solicitando cotización con quoteSwap...`);
@@ -224,11 +227,10 @@ export async function POST(request: Request) {
         success: true,
         message: `Intercambio iniciado. Enviaste ${amountToSend} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
         txHash: finalTx.tx?.hash,
-        orderId: depositAddress, // Usamos la dirección como referencia
+        orderId: depositAddress,
       });
 
     } else if (execute.kind === 'transaction') {
-      // Ruta de transacción (EVM) — no soportada para BTC/LTC en este endpoint
       throw new Error('Esta ruta requiere firma de transacción EVM, no soportada para BTC/LTC en este endpoint.');
     } else {
       throw new Error('Tipo de ejecución desconocido en la cotización de Hypermid.');
