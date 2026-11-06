@@ -42,6 +42,48 @@ const NETWORKS: Record<string, { blockcypher: string; network: any }> = {
   BTC: { blockcypher: 'btc', network: bitcoin.networks.bitcoin },
 };
 
+// --- Configuración de Godex ---
+const GODEX_API_BASE = 'https://api.godex.io/api/v1';
+// Opcional: Clave pública de afiliado para seguimiento (consíguela en tu panel de afiliado)
+const GODEX_PUBLIC_KEY = process.env.GODEX_PUBLIC_KEY || '';
+
+/**
+ * Realiza una petición a la API de Godex.
+ * La autenticación es opcional mediante la cabecera 'public-key'.
+ */
+async function godexRequest(path: string, method: 'GET' | 'POST' = 'POST', body?: any) {
+  const url = `${GODEX_API_BASE}${path}`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (GODEX_PUBLIC_KEY) {
+    headers['public-key'] = GODEX_PUBLIC_KEY;
+  }
+
+  const options: RequestInit = { method, headers };
+  if (body) {
+    options.body = JSON.stringify(body);
+  }
+
+  const res = await fetch(url, options);
+  const text = await res.text();
+
+  let json: any;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    console.error(`[Godex] Respuesta no JSON (HTTP ${res.status}):`, text.substring(0, 300));
+    throw new Error(`Godex devolvió una respuesta inesperada (HTTP ${res.status}).`);
+  }
+
+  if (!res.ok) {
+    throw new Error(json.error || json.message || `Error ${res.status} en Godex`);
+  }
+
+  return json;
+}
+
 export async function POST(request: Request) {
   try {
     const { userId, fromSymbol, toSymbol, amount } = await request.json();
@@ -83,164 +125,138 @@ export async function POST(request: Request) {
       await toWalletRef.set({ address: toAddress, privateKey: genData.private, createdAt: new Date().toISOString() });
     }
 
-    // --- 3. Import dinámico de Hypermid ---
-    const hypermidModule = await import('@hypermid/sdk');
-    const { Hypermid, quoteSwap } = hypermidModule;
-
-    const hm = new Hypermid();
-    const chainsResponse: any = await hm.getChains();
-    const chainsList = Array.isArray(chainsResponse) ? chainsResponse : (chainsResponse.chains || []);
-
-    if (!Array.isArray(chainsList)) {
-      throw new Error('Hypermid devolvió un formato de cadenas inesperado.');
-    }
-
-    const fromChainInfo: any = chainsList.find((c: any) => {
-      const symbol = (c?.native as any)?.symbol || c?.symbol || c?.ticker;
-      return symbol && symbol.toUpperCase() === upperFrom;
-    });
-
-    const toChainInfo: any = chainsList.find((c: any) => {
-      const symbol = (c?.native as any)?.symbol || c?.symbol || c?.ticker;
-      return symbol && symbol.toUpperCase() === upperTo;
-    });
-
-    if (!fromChainInfo) {
-      throw new Error(`Hypermid no soporta la cadena de origen ${upperFrom}.`);
-    }
-    if (!toChainInfo) {
-      throw new Error(`Hypermid no soporta la cadena de destino ${upperTo}.`);
-    }
-
-    const fromChainId = fromChainInfo.chainId || fromChainInfo.id;
-    const toChainId = toChainInfo.chainId || toChainInfo.id;
-
-    // --- 4. Convertir la cantidad a unidades base ---
-    const nativeInfo = fromChainInfo.native as any;
-    const decimals = nativeInfo?.decimals || 8;
-    const amountInBaseUnits = BigInt(Math.round(parseFloat(amount) * Math.pow(10, decimals))).toString();
-
-    // --- 5. Construir el SwapQuoteRequest con las direcciones como tokens ---
-    // ✅ CORRECCIÓN: tokenIn y tokenOut son las direcciones de las wallets.
-    // No se incluye srcAddress ni refundAddress.
-    const swapRequest = {
-      srcChain: fromChainId,
-      dstChain: toChainId,
-      tokenIn: fromWallet.address,  // Dirección LTC de origen (formato UTXO válido)
-      tokenOut: toAddress,          // Dirección BTC de destino (formato UTXO válido)
-      amountIn: amountInBaseUnits,
-      recipient: toAddress,         // Dirección donde se recibirán los fondos
+    // --- 3. Obtener cotización de Godex ---
+    // Endpoint inferido: POST /info para obtener la tasa y los detalles del intercambio
+    const quotePayload = {
+      from: upperFrom.toLowerCase(),
+      to: upperTo.toLowerCase(),
+      amount: parseFloat(amount),
+      address: toAddress, // Dirección de recepción
+      // refund: fromWallet.address, // Opcional para reembolsos
     };
 
-    console.log(`[Hypermid] Solicitando cotización con quoteSwap...`);
-    const quote = await quoteSwap(swapRequest);
+    console.log(`[Godex] Solicitando cotización...`);
+    const quote = await godexRequest('/info', 'POST', quotePayload);
 
-    if (!quote) {
-      throw new Error('Hypermid no devolvió una cotización válida.');
+    // La respuesta de Godex suele incluir 'amount', 'min_amount', 'max_amount', 'rate', 'transaction_id'
+    const minAmount = parseFloat(quote.min_amount || '0');
+    const maxAmount = parseFloat(quote.max_amount || '0');
+
+    if (minAmount > 0 && parseFloat(amount) < minAmount) {
+      return NextResponse.json({ error: `El monto mínimo para este par es ${minAmount} ${upperFrom}.` }, { status: 400 });
+    }
+    if (maxAmount > 0 && parseFloat(amount) > maxAmount) {
+      return NextResponse.json({ error: `El monto máximo para este par es ${maxAmount} ${upperFrom}.` }, { status: 400 });
     }
 
-    // --- 6. Manejar el resultado discriminado de quoteSwap ---
-    const execute = quote.execute;
-
-    if (execute.kind === 'deposit') {
-      // Ruta de depósito (BTC/LTC)
-      const depositAddress = execute.address;
-      const amountToSend = execute.amount || amountInBaseUnits;
-      const expectedReceive = quote.estimatedOut;
-
-      console.log(`[Hypermid] Ruta de depósito. Enviar ${amountToSend} ${upperFrom} a ${depositAddress}`);
-
-      // --- 7. Construir y firmar la transacción on-chain (envío a la dirección de depósito) ---
-      const amountSatoshi = Math.round(parseFloat(amountToSend) * 1e8);
-
-      const newTx = {
-        inputs: [{ addresses: [fromWallet.address] }],
-        outputs: [{ addresses: [depositAddress], value: amountSatoshi }],
-      };
-
-      const txRes = await fetch(`https://api.blockcypher.com/v1/${fromConfig.blockcypher}/main/txs/new`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newTx),
-      });
-
-      const txData = await txRes.json();
-      if (!txRes.ok || (txData.errors && txData.errors.length > 0)) {
-        const errMsg = txData.errors?.map((e: any) => e.error).join(' | ') || 'Error de red';
-        throw new Error(`BlockCypher: ${errMsg}`);
-      }
-
-      // --- 8. Firmar cada hash "tosign" ---
-      let keyPair;
-      try {
-        const hexKey = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
-        if (hexKey.length === 64) {
-          keyPair = ECPair.fromPrivateKey(Buffer.from(hexKey, 'hex'), { network: fromConfig.network });
-        } else {
-          keyPair = ECPair.fromWIF(privateKey, fromConfig.network);
-        }
-      } catch (e) {
-        throw new Error('Error leyendo clave privada. Genera una nueva billetera.');
-      }
-
-      txData.pubkeys = [];
-      txData.signatures = txData.tosign.map((tosign: string) => {
-        const signature = keyPair.sign(Buffer.from(tosign, 'hex'));
-        const encoded = bitcoin.script.signature.encode(signature, bitcoin.Transaction.SIGHASH_ALL);
-        txData.pubkeys.push(keyPair.publicKey.toString('hex'));
-        return encoded.toString('hex').slice(0, -2);
-      });
-
-      // --- 9. Enviar transacción firmada a BlockCypher ---
-      const sendRes = await fetch(`https://api.blockcypher.com/v1/${fromConfig.blockcypher}/main/txs/send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(txData),
-      });
-
-      const finalTx = await sendRes.json();
-      if (!sendRes.ok) {
-        const errDetail = JSON.stringify(finalTx.errors || finalTx);
-        throw new Error(`Error al enviar a Hypermid: ${errDetail}`);
-      }
-
-      // --- 10. Actualizar saldos en Firestore (transacción atómica) ---
-      const fromBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperFrom);
-      const toBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperTo);
-
-      await db.runTransaction(async (t) => {
-        const fromDoc = await t.get(fromBalanceRef);
-        const currentFrom = fromDoc.exists ? fromDoc.data()?.amount || 0 : 0;
-        if (currentFrom < parseFloat(amountToSend)) {
-          throw new Error('Saldo insuficiente');
-        }
-
-        const toDoc = await t.get(toBalanceRef);
-        const currentTo = toDoc.exists ? toDoc.data()?.amount || 0 : 0;
-
-        t.set(fromBalanceRef, { amount: currentFrom - parseFloat(amountToSend) }, { merge: true });
-        t.set(toBalanceRef, { amount: currentTo + parseFloat(expectedReceive) }, { merge: true });
-      });
-
-      // --- 11. Respuesta exitosa ---
-      return NextResponse.json({
-        success: true,
-        message: `Intercambio iniciado. Enviaste ${amountToSend} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
-        txHash: finalTx.tx?.hash,
-        orderId: depositAddress,
-      });
-
-    } else if (execute.kind === 'transaction') {
-      throw new Error('Esta ruta requiere firma de transacción EVM, no soportada para BTC/LTC en este endpoint.');
-    } else {
-      throw new Error('Tipo de ejecución desconocido en la cotización de Hypermid.');
+    const expectedReceive = parseFloat(quote.amount || '0');
+    if (!expectedReceive) {
+      throw new Error('Godex no devolvió una cantidad estimada a recibir.');
     }
+
+    // --- 4. Crear el intercambio en Godex ---
+    // Endpoint inferido: POST /exchange para crear la orden y obtener la dirección de depósito
+    const exchangePayload = {
+      from: upperFrom.toLowerCase(),
+      to: upperTo.toLowerCase(),
+      amount: parseFloat(amount),
+      address: toAddress,
+      refund: fromWallet.address, // Opcional pero recomendado
+    };
+
+    console.log(`[Godex] Creando orden de intercambio...`);
+    const exchangeData = await godexRequest('/exchange', 'POST', exchangePayload);
+
+    // La respuesta de Godex debe incluir 'deposit' (dirección de depósito) y 'transaction_id'
+    const depositAddress = exchangeData.deposit;
+    const orderId = exchangeData.transaction_id;
+
+    if (!depositAddress) {
+      throw new Error('Godex no devolvió una dirección de depósito válida.');
+    }
+
+    // --- 5. Construir y firmar la transacción on-chain (envío a la dirección de depósito) ---
+    const amountSatoshi = Math.round(parseFloat(amount) * 1e8);
+
+    const newTx = {
+      inputs: [{ addresses: [fromWallet.address] }],
+      outputs: [{ addresses: [depositAddress], value: amountSatoshi }],
+    };
+
+    const txRes = await fetch(`https://api.blockcypher.com/v1/${fromConfig.blockcypher}/main/txs/new`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newTx),
+    });
+
+    const txData = await txRes.json();
+    if (!txRes.ok || (txData.errors && txData.errors.length > 0)) {
+      const errMsg = txData.errors?.map((e: any) => e.error).join(' | ') || 'Error de red';
+      throw new Error(`BlockCypher: ${errMsg}`);
+    }
+
+    // --- 6. Firmar cada hash "tosign" ---
+    let keyPair;
+    try {
+      const hexKey = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
+      if (hexKey.length === 64) {
+        keyPair = ECPair.fromPrivateKey(Buffer.from(hexKey, 'hex'), { network: fromConfig.network });
+      } else {
+        keyPair = ECPair.fromWIF(privateKey, fromConfig.network);
+      }
+    } catch (e) {
+      throw new Error('Error leyendo clave privada. Genera una nueva billetera.');
+    }
+
+    txData.pubkeys = [];
+    txData.signatures = txData.tosign.map((tosign: string) => {
+      const signature = keyPair.sign(Buffer.from(tosign, 'hex'));
+      const encoded = bitcoin.script.signature.encode(signature, bitcoin.Transaction.SIGHASH_ALL);
+      txData.pubkeys.push(keyPair.publicKey.toString('hex'));
+      return encoded.toString('hex').slice(0, -2);
+    });
+
+    // --- 7. Enviar transacción firmada a BlockCypher ---
+    const sendRes = await fetch(`https://api.blockcypher.com/v1/${fromConfig.blockcypher}/main/txs/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(txData),
+    });
+
+    const finalTx = await sendRes.json();
+    if (!sendRes.ok) {
+      const errDetail = JSON.stringify(finalTx.errors || finalTx);
+      throw new Error(`Error al enviar a Godex: ${errDetail}`);
+    }
+
+    // --- 8. Actualizar saldos en Firestore (transacción atómica) ---
+    const fromBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperFrom);
+    const toBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperTo);
+
+    await db.runTransaction(async (t) => {
+      const fromDoc = await t.get(fromBalanceRef);
+      const currentFrom = fromDoc.exists ? fromDoc.data()?.amount || 0 : 0;
+      if (currentFrom < parseFloat(amount)) {
+        throw new Error('Saldo insuficiente');
+      }
+
+      const toDoc = await t.get(toBalanceRef);
+      const currentTo = toDoc.exists ? toDoc.data()?.amount || 0 : 0;
+
+      t.set(fromBalanceRef, { amount: currentFrom - parseFloat(amount) }, { merge: true });
+      t.set(toBalanceRef, { amount: currentTo + expectedReceive }, { merge: true });
+    });
+
+    // --- 9. Respuesta exitosa ---
+    return NextResponse.json({
+      success: true,
+      message: `Intercambio iniciado. Enviaste ${amount} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
+      txHash: finalTx.tx?.hash,
+      orderId: orderId,
+    });
 
   } catch (error: any) {
-    console.error('🔥 [Error en swap con Hypermid]:', error);
-    if (error.message.includes('no soporta')) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
-    }
+    console.error('🔥 [Error en swap con Godex]:', error);
     return NextResponse.json({ error: error.message || 'Error interno' }, { status: 500 });
   }
 }
