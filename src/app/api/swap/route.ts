@@ -43,18 +43,15 @@ const NETWORKS: Record<string, { blockcypher: string; network: any }> = {
 };
 
 // --- Configuración de Godex ---
-const GODEX_API_BASE = 'https://api.godex.io/api/v1';
-// Opcional: Clave pública de afiliado para seguimiento (consíguela en tu panel de afiliado)
+// ✅ URL base correcta (sin /api/v1, que se añade en cada ruta)
+const GODEX_API_BASE = 'https://api.godex.io';
 const GODEX_PUBLIC_KEY = process.env.GODEX_PUBLIC_KEY || '';
 
-/**
- * Realiza una petición a la API de Godex.
- * La autenticación es opcional mediante la cabecera 'public-key'.
- */
 async function godexRequest(path: string, method: 'GET' | 'POST' = 'POST', body?: any) {
   const url = `${GODEX_API_BASE}${path}`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'Accept': 'application/json',
   };
 
   if (GODEX_PUBLIC_KEY) {
@@ -69,12 +66,13 @@ async function godexRequest(path: string, method: 'GET' | 'POST' = 'POST', body?
   const res = await fetch(url, options);
   const text = await res.text();
 
+  // Intentar parsear JSON; si falla, lanzar error con el cuerpo HTML
   let json: any;
   try {
     json = JSON.parse(text);
   } catch {
     console.error(`[Godex] Respuesta no JSON (HTTP ${res.status}):`, text.substring(0, 300));
-    throw new Error(`Godex devolvió una respuesta inesperada (HTTP ${res.status}).`);
+    throw new Error(`Godex devolvió una respuesta inesperada (HTTP ${res.status}). Revisa los logs.`);
   }
 
   if (!res.ok) {
@@ -125,20 +123,20 @@ export async function POST(request: Request) {
       await toWalletRef.set({ address: toAddress, privateKey: genData.private, createdAt: new Date().toISOString() });
     }
 
-    // --- 3. Obtener cotización de Godex ---
-    // Endpoint inferido: POST /info para obtener la tasa y los detalles del intercambio
+    // --- 3. Obtener cotización (CORREGIDO: sin address ni refund) ---
     const quotePayload = {
       from: upperFrom.toLowerCase(),
       to: upperTo.toLowerCase(),
       amount: parseFloat(amount),
-      address: toAddress, // Dirección de recepción
-      // refund: fromWallet.address, // Opcional para reembolsos
+      float: true, // Obligatorio para tasa flotante
+      network_from: upperFrom.toUpperCase(), // Para nativos, la red es el ticker
+      network_to: upperTo.toUpperCase(),
     };
 
-    console.log(`[Godex] Solicitando cotización...`);
-    const quote = await godexRequest('/info', 'POST', quotePayload);
+    console.log(`[Godex] Solicitando cotización con:`, quotePayload);
+    const quote = await godexRequest('/api/v1/info', 'POST', quotePayload);
 
-    // La respuesta de Godex suele incluir 'amount', 'min_amount', 'max_amount', 'rate', 'transaction_id'
+    // La respuesta de /info incluye: amount, rate, min_amount, max_amount, fee
     const minAmount = parseFloat(quote.min_amount || '0');
     const maxAmount = parseFloat(quote.max_amount || '0');
 
@@ -154,20 +152,23 @@ export async function POST(request: Request) {
       throw new Error('Godex no devolvió una cantidad estimada a recibir.');
     }
 
-    // --- 4. Crear el intercambio en Godex ---
-    // Endpoint inferido: POST /exchange para crear la orden y obtener la dirección de depósito
+    // --- 4. Crear el intercambio (endpoint /api/v1/exchange) ---
+    // Este endpoint sí requiere address y refund.
     const exchangePayload = {
       from: upperFrom.toLowerCase(),
       to: upperTo.toLowerCase(),
       amount: parseFloat(amount),
       address: toAddress,
-      refund: fromWallet.address, // Opcional pero recomendado
+      refund: fromWallet.address,
+      float: true,
+      network_from: upperFrom.toUpperCase(),
+      network_to: upperTo.toUpperCase(),
     };
 
-    console.log(`[Godex] Creando orden de intercambio...`);
-    const exchangeData = await godexRequest('/exchange', 'POST', exchangePayload);
+    console.log(`[Godex] Creando orden de intercambio con:`, exchangePayload);
+    const exchangeData = await godexRequest('/api/v1/exchange', 'POST', exchangePayload);
 
-    // La respuesta de Godex debe incluir 'deposit' (dirección de depósito) y 'transaction_id'
+    // La respuesta de /exchange debe incluir 'deposit' (dirección de depósito) y 'transaction_id'
     const depositAddress = exchangeData.deposit;
     const orderId = exchangeData.transaction_id;
 
