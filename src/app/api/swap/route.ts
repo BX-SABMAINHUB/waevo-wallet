@@ -4,7 +4,7 @@ import * as bitcoin from 'bitcoinjs-lib';
 import ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
-import { quoteSwap } from '@hypermid/sdk'; // ✅ Nuevo método recomendado
+import { quoteSwap } from '@hypermid/sdk';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -12,7 +12,7 @@ export const dynamic = 'force-dynamic';
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
 
-// --- Inicialización de Firebase Admin (sin cambios) ---
+// --- Inicialización de Firebase Admin ---
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
@@ -85,33 +85,48 @@ export async function POST(request: Request) {
     }
 
     // --- 3. Obtener los IDs de cadena de Hypermid dinámicamente ---
-    // (Nota: quoteSwap puede obtener los chains internamente, pero mantenemos esta lógica para robustez)
-    // Para simplificar, puedes omitir esta parte si quoteSwap acepta nombres de símbolos directamente.
-    // Asumiremos que quoteSwap acepta los mismos parámetros que getQuote.
-    // En una implementación real, deberías consultar hm.getChains() como antes.
-    // Para brevedad, aquí usaremos una lógica simplificada, pero en producción mantén la búsqueda de chains.
-    // ...
-    // (Se recomienda mantener la lógica de búsqueda de chains que ya tenías)
-    // ...
+    const hypermid = new (require('@hypermid/sdk').Hypermid)();
+    const chainsResponse: any = await hypermid.getChains();
+    const chainsList = Array.isArray(chainsResponse) ? chainsResponse : (chainsResponse.chains || []);
 
-    // --- 4. Construir la solicitud para quoteSwap ---
-    // quoteSwap espera un objeto request similar al de getQuote.
-    // Asumimos que los chains son 1 para BTC y 2 para LTC (ejemplo; ajusta según Hypermid).
-    // En producción, obtén los IDs reales con hm.getChains().
-    const fromChainId = upperFrom === 'BTC' ? 1 : 2; // Ejemplo
-    const toChainId = upperTo === 'BTC' ? 1 : 2;     // Ejemplo
+    if (!Array.isArray(chainsList)) {
+      throw new Error('Hypermid devolvió un formato de cadenas inesperado.');
+    }
 
-    const decimals = 8; // BTC/LTC usan 8 decimales
+    const fromChainInfo: any = chainsList.find((c: any) => {
+      const symbol = (c?.native as any)?.symbol || c?.symbol || c?.ticker;
+      return symbol && symbol.toUpperCase() === upperFrom;
+    });
+
+    const toChainInfo: any = chainsList.find((c: any) => {
+      const symbol = (c?.native as any)?.symbol || c?.symbol || c?.ticker;
+      return symbol && symbol.toUpperCase() === upperTo;
+    });
+
+    if (!fromChainInfo) {
+      throw new Error(`Hypermid no soporta la cadena de origen ${upperFrom}.`);
+    }
+    if (!toChainInfo) {
+      throw new Error(`Hypermid no soporta la cadena de destino ${upperTo}.`);
+    }
+
+    const fromChainId = fromChainInfo.chainId || fromChainInfo.id;
+    const toChainId = toChainInfo.chainId || toChainInfo.id;
+
+    // --- 4. Convertir la cantidad a unidades base (satoshis para BTC/LTC) ---
+    const nativeInfo = fromChainInfo.native as any;
+    const decimals = nativeInfo?.decimals || 8;
     const amountInBaseUnits = BigInt(Math.round(parseFloat(amount) * Math.pow(10, decimals))).toString();
 
+    // --- 5. Construir el objeto SwapQuoteRequest con los nombres correctos ---
     const swapRequest = {
-      fromChain: fromChainId,
-      toChain: toChainId,
-      fromToken: "native",
-      toToken: "native",
-      fromAmount: amountInBaseUnits,
-      fromAddress: fromWallet.address,
-      toAddress: toAddress,
+      srcChain: fromChainId,
+      dstChain: toChainId,
+      tokenIn: "native",   // Token nativo (BTC/LTC)
+      tokenOut: "native",
+      amountIn: amountInBaseUnits,
+      recipient: toAddress,
+      refundAddress: fromWallet.address, // Opcional pero recomendado
     };
 
     console.log(`[Hypermid] Solicitando cotización con quoteSwap...`);
@@ -121,18 +136,18 @@ export async function POST(request: Request) {
       throw new Error('Hypermid no devolvió una cotización válida.');
     }
 
-    // --- 5. Manejar el resultado discriminado de quoteSwap ---
+    // --- 6. Manejar el resultado discriminado de quoteSwap ---
     const execute = quote.execute;
 
     if (execute.kind === 'deposit') {
       // Ruta de depósito (BTC/LTC)
       const depositAddress = execute.address;
-      const amountToSend = execute.amount || amount; // Si no se especifica, usa el amount original
-      const expectedReceive = quote.estimatedOut; // Cantidad estimada a recibir
+      const amountToSend = execute.amount || amountInBaseUnits;
+      const expectedReceive = quote.estimatedOut;
 
       console.log(`[Hypermid] Ruta de depósito. Enviar ${amountToSend} ${upperFrom} a ${depositAddress}`);
 
-      // --- 6. Construir y firmar la transacción on-chain (envío a la dirección de depósito) ---
+      // --- 7. Construir y firmar la transacción on-chain (envío a la dirección de depósito) ---
       const amountSatoshi = Math.round(parseFloat(amountToSend) * 1e8);
 
       const newTx = {
@@ -152,7 +167,7 @@ export async function POST(request: Request) {
         throw new Error(`BlockCypher: ${errMsg}`);
       }
 
-      // --- 7. Firmar cada hash "tosign" ---
+      // --- 8. Firmar cada hash "tosign" ---
       let keyPair;
       try {
         const hexKey = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
@@ -173,7 +188,7 @@ export async function POST(request: Request) {
         return encoded.toString('hex').slice(0, -2);
       });
 
-      // --- 8. Enviar transacción firmada a BlockCypher ---
+      // --- 9. Enviar transacción firmada a BlockCypher ---
       const sendRes = await fetch(`https://api.blockcypher.com/v1/${fromConfig.blockcypher}/main/txs/send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -186,7 +201,7 @@ export async function POST(request: Request) {
         throw new Error(`Error al enviar a Hypermid: ${errDetail}`);
       }
 
-      // --- 9. Actualizar saldos en Firestore (transacción atómica) ---
+      // --- 10. Actualizar saldos en Firestore (transacción atómica) ---
       const fromBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperFrom);
       const toBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperTo);
 
@@ -204,7 +219,7 @@ export async function POST(request: Request) {
         t.set(toBalanceRef, { amount: currentTo + parseFloat(expectedReceive) }, { merge: true });
       });
 
-      // --- 10. Respuesta exitosa ---
+      // --- 11. Respuesta exitosa ---
       return NextResponse.json({
         success: true,
         message: `Intercambio iniciado. Enviaste ${amountToSend} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
@@ -213,9 +228,7 @@ export async function POST(request: Request) {
       });
 
     } else if (execute.kind === 'transaction') {
-      // Ruta de transacción (EVM)
-      // Aquí deberías firmar y enviar la transacción EVM usando viem, etc.
-      // Para BTC/LTC no se usa esta rama.
+      // Ruta de transacción (EVM) — no soportada para BTC/LTC en este endpoint
       throw new Error('Esta ruta requiere firma de transacción EVM, no soportada para BTC/LTC en este endpoint.');
     } else {
       throw new Error('Tipo de ejecución desconocido en la cotización de Hypermid.');
