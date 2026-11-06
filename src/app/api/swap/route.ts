@@ -120,17 +120,16 @@ export async function POST(request: Request) {
     const decimals = nativeInfo?.decimals || 8;
     const amountInBaseUnits = BigInt(Math.round(parseFloat(amount) * Math.pow(10, decimals))).toString();
 
-    // --- 5. Construir el SwapQuoteRequest con los campos y formatos correctos ---
-    // tokenIn debe ser una dirección válida de la cadena de origen (Litecoin en este caso).
-    // tokenOut debe ser una dirección válida de la cadena de destino (Bitcoin en este caso).
-    // El campo refundAddress NO debe incluirse.
+    // --- 5. Construir el SwapQuoteRequest con los identificadores de activo correctos ---
+    // ✅ CORRECCIÓN: Usar "native:ltc" y "native:btc" en lugar de direcciones.
     const swapRequest = {
       srcChain: fromChainId,
       dstChain: toChainId,
-      tokenIn: fromWallet.address, // Dirección LTC de origen (formato utxo válido)
-      tokenOut: toAddress,         // Dirección BTC de destino (formato utxo válido)
+      tokenIn: `native:${upperFrom.toLowerCase()}`,
+      tokenOut: `native:${upperTo.toLowerCase()}`,
       amountIn: amountInBaseUnits,
       recipient: toAddress,
+      srcAddress: fromWallet.address, // Dirección de origen (para UTXO)
     };
 
     console.log(`[Hypermid] Solicitando cotización con quoteSwap...`);
