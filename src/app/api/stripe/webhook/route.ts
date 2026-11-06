@@ -39,7 +39,7 @@ export async function POST(req: Request) {
     const auth = event.data.object as Stripe.Issuing.Authorization;
     const cardId = auth.card.id;
 
-    // ✅ CORRECCIÓN: Verificar que pending_request existe antes de acceder a .amount
+    // ✅ Verificar que pending_request existe antes de acceder a .amount
     if (!auth.pending_request || typeof auth.pending_request.amount !== "number") {
       console.warn(`⚠️ Autorización ${auth.id} sin pending_request válido.`);
       return NextResponse.json({ error: "No pending request" }, { status: 400 });
@@ -57,7 +57,8 @@ export async function POST(req: Request) {
 
     if (usersSnap.empty) {
       console.warn(`⚠️ Tarjeta ${cardId} no asociada a ningún usuario.`);
-      await stripe.issuing.authorizations.decline(auth.id, { reason: "card_not_active" });
+      // ✅ CORRECCIÓN: Se elimina el parámetro { reason: ... }
+      await stripe.issuing.authorizations.decline(auth.id);
       return NextResponse.json({ ok: true });
     }
 
@@ -116,15 +117,16 @@ export async function POST(req: Request) {
         console.log(`✅ Pago aprobado y saldo descontado para usuario ${userId}`);
       } catch (err: any) {
         console.error(`❌ Error descontando saldo: ${err.message}`);
-        // Si falla el descuento, revertimos aprobando de nuevo (o rechazando si es posible)
-        // En un sistema real, se debería rechazar la autorización si no se puede descontar.
-        await stripe.issuing.authorizations.decline(auth.id, { reason: "insufficient_funds" });
+        // Si falla el descuento, declinamos la autorización.
+        // ✅ CORRECCIÓN: Se elimina el parámetro { reason: ... }
+        await stripe.issuing.authorizations.decline(auth.id);
         return NextResponse.json({ error: "Error descontando saldo" }, { status: 500 });
       }
     } else {
       // Saldo insuficiente
       console.log(`❌ Saldo insuficiente para usuario ${userId}. Necesita ${amount / 100} EUR, tiene ${totalEur} EUR.`);
-      await stripe.issuing.authorizations.decline(auth.id, { reason: "insufficient_funds" });
+      // ✅ CORRECCIÓN: Se elimina el parámetro { reason: ... }
+      await stripe.issuing.authorizations.decline(auth.id);
     }
   }
 
