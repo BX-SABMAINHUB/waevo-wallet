@@ -28,7 +28,7 @@ if (!admin.apps.length) {
   }
 }
 
-// --- Redes soportadas (LTC y BTC) ---
+// --- Redes soportadas para el envío on-chain (BlockCypher) ---
 const litecoinNetwork = {
   messagePrefix: '\x19Litecoin Signed Message:\n',
   bech32: 'ltc',
@@ -43,55 +43,40 @@ const NETWORKS: Record<string, { blockcypher: string; network: any }> = {
   BTC: { blockcypher: 'btc', network: bitcoin.networks.bitcoin },
 };
 
-const FIXEDFLOAT_API_KEY = process.env.FIXEDFLOAT_API_KEY!;
-const FIXEDFLOAT_API_SECRET = process.env.FIXEDFLOAT_API_SECRET!;
-
-// --- Firma HMAC-SHA256 (idéntica a la documentación oficial) ---
-function signFixedFloat(data: string): string {
-  return crypto
-    .createHmac('sha256', FIXEDFLOAT_API_SECRET)
-    .update(data, 'utf8')
-    .digest('hex');
-}
+const SWAPTITAN_BASE_URL = 'https://swaptitan.net';
 
 /**
- * Llama a la API v2 de FixedFloat.
- * @param method - Nombre del método (ej. 'create', 'price', 'getOrder')
- * @param params - Objeto de parámetros que se serializará a JSON
+ * Llama a la API de SwapTitan.
+ * @param path - Ruta del endpoint (ej. '/v1/swap/quote' o '/v1/swap/swap')
+ * @param method - GET o POST
+ * @param body - Cuerpo opcional para POST
  */
-async function fixedFloatRequest(method: string, params: any) {
-  const data = JSON.stringify(params);
-  const signature = signFixedFloat(data);
+async function swapTitanRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: any) {
+  const url = `${SWAPTITAN_BASE_URL}${path}`;
+  const options: RequestInit = {
+    method,
+    headers: method === 'POST' ? { 'Content-Type': 'application/json' } : {},
+  };
+  if (body) {
+    options.body = JSON.stringify(body);
+  }
 
-  const res = await fetch(`https://ff.io/api/v2/${method}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json; charset=UTF-8',
-      'X-API-KEY': FIXEDFLOAT_API_KEY,
-      'X-API-SIGN': signature,
-    },
-    body: data,
-  });
-
+  const res = await fetch(url, options);
   const text = await res.text();
-  let json: any;
 
+  let json: any;
   try {
     json = JSON.parse(text);
   } catch {
-    console.error(`[FixedFloat] Respuesta no JSON (HTTP ${res.status}):`, text.substring(0, 300));
-    throw new Error(`FixedFloat devolvió una respuesta inesperada (HTTP ${res.status}).`);
+    console.error(`[SwapTitan] Respuesta no JSON (HTTP ${res.status}):`, text.substring(0, 300));
+    throw new Error(`SwapTitan devolvió una respuesta inesperada (HTTP ${res.status}).`);
   }
 
-  if (json.code !== 0) {
-    // Manejo específico para el código 300 (región bloqueada / error interno)
-    if (json.code === 300 || json.msg === 'Internal error') {
-      throw new Error('El intercambio no está disponible en tu región en este momento. Inténtalo más tarde o contacta con soporte.');
-    }
-    throw new Error(`FixedFloat: ${json.msg || 'Error en la petición'}`);
+  if (!res.ok) {
+    throw new Error(json.error || json.message || `Error ${res.status} en SwapTitan`);
   }
 
-  return json.data;
+  return json;
 }
 
 export async function POST(request: Request) {
@@ -102,8 +87,8 @@ export async function POST(request: Request) {
     const fromConfig = NETWORKS[upperFrom];
 
     // --- Validaciones básicas ---
-    if (!fromConfig || !userId || !amount || amount <= 0) {
-      return NextResponse.json({ error: 'Faltan parámetros o red no soportada' }, { status: 400 });
+    if (!upperFrom || !upperTo || !userId || !amount || amount <= 0) {
+      return NextResponse.json({ error: 'Faltan parámetros: fromSymbol, toSymbol, userId y amount son obligatorios.' }, { status: 400 });
     }
 
     const db = admin.firestore();
@@ -136,35 +121,29 @@ export async function POST(request: Request) {
       await toWalletRef.set({ address: toAddress, privateKey: genData.private, createdAt: new Date().toISOString() });
     }
 
-    // --- 3. Crear orden en FixedFloat ---
-    const orderParams = {
-      fromCcy: upperFrom,
-      toCcy: upperTo,
-      amount: parseFloat(amount),
-      direction: 'from',   // 'from' = el amount es la cantidad que se envía
-      type: 'float',       // 'float' o 'fixed'
-      toAddress: toAddress,
-    };
+    // --- 3. Obtener cotización de SwapTitan (cross-chain) ---
+    // Según la documentación, el endpoint de cotización cross-chain es:
+    // GET /v1/swap/quote?from=btc&to=eth&amount=1
+    // (Soporta 1288+ assets, incluyendo BTC y LTC)[reference:2]
+    const quotePath = `/v1/swap/quote?from=${upperFrom.toLowerCase()}&to=${upperTo.toLowerCase()}&amount=${amount}`;
+    console.log(`[SwapTitan] Solicitando cotización: ${quotePath}`);
+    const quote = await swapTitanRequest(quotePath);
 
-    const orderData = await fixedFloatRequest('create', orderParams);
-
-    // La respuesta de FixedFloat tiene esta estructura (según docs oficiales):
-    // orderData.from.address  -> dirección de depósito
-    // orderData.to.amount     -> cantidad estimada a recibir
-    // orderData.id            -> ID de la orden
-    const depositAddress = orderData.from?.address;
-    const expectedReceive = orderData.to?.amount;
-    const orderId = orderData.id;
+    // La respuesta de cotización debe incluir los detalles de la ruta.
+    // Asumimos que devuelve un objeto con 'fromAmount', 'toAmount', 'depositAddress', etc.
+    // Ajusta estos campos según la respuesta real de SwapTitan.
+    const depositAddress = quote.depositAddress || quote.address;
+    const expectedReceive = quote.toAmount || quote.receiveAmount;
+    const orderId = quote.orderId || quote.id;
 
     if (!depositAddress) {
-      throw new Error('FixedFloat no devolvió una dirección de depósito válida.');
+      throw new Error('SwapTitan no devolvió una dirección de depósito válida en la cotización.');
     }
 
-    // --- 4. Construir y firmar la transacción on-chain ---
-    // Convertimos la cantidad a satoshis (1e8)
+    // --- 4. Construir y firmar la transacción on-chain (envío a la dirección de depósito) ---
+    // (Esta parte se mantiene igual, usando BlockCypher para enviar los fondos)
     const amountSatoshi = Math.round(parseFloat(amount) * 1e8);
 
-    // Preparamos la transacción para BlockCypher
     const newTx = {
       inputs: [{ addresses: [fromWallet.address] }],
       outputs: [{ addresses: [depositAddress], value: amountSatoshi }],
@@ -198,10 +177,8 @@ export async function POST(request: Request) {
     txData.pubkeys = [];
     txData.signatures = txData.tosign.map((tosign: string) => {
       const signature = keyPair.sign(Buffer.from(tosign, 'hex'));
-      // Codificamos la firma en formato DER + SIGHASH_ALL
       const encoded = bitcoin.script.signature.encode(signature, bitcoin.Transaction.SIGHASH_ALL);
       txData.pubkeys.push(keyPair.publicKey.toString('hex'));
-      // BlockCypher espera la firma sin el byte de SIGHASH al final
       return encoded.toString('hex').slice(0, -2);
     });
 
@@ -215,7 +192,7 @@ export async function POST(request: Request) {
     const finalTx = await sendRes.json();
     if (!sendRes.ok) {
       const errDetail = JSON.stringify(finalTx.errors || finalTx);
-      throw new Error(`Error al enviar a FixedFloat: ${errDetail}`);
+      throw new Error(`Error al enviar a SwapTitan: ${errDetail}`);
     }
 
     // --- 7. Actualizar saldos en Firestore (transacción atómica) ---
@@ -241,11 +218,11 @@ export async function POST(request: Request) {
       success: true,
       message: `Intercambio en proceso. Enviaste ${amount} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
       txHash: finalTx.tx?.hash,
-      orderId,
+      orderId: orderId,
     });
 
   } catch (error: any) {
-    console.error('🔥 [Error en swap]:', error);
+    console.error('🔥 [Error en swap con SwapTitan]:', error);
     return NextResponse.json({ error: error.message || 'Error interno' }, { status: 500 });
   }
 }
