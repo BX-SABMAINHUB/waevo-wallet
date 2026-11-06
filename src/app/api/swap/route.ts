@@ -4,7 +4,6 @@ import * as bitcoin from 'bitcoinjs-lib';
 import ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
-import crypto from 'crypto';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -43,19 +42,22 @@ const NETWORKS: Record<string, { blockcypher: string; network: any }> = {
   BTC: { blockcypher: 'btc', network: bitcoin.networks.bitcoin },
 };
 
-const SWAPTITAN_BASE_URL = 'https://swaptitan.net';
+// --- Configuración de Exolix ---
+const EXOLIX_API_KEY = process.env.EXOLIX_API_KEY!;
+const EXOLIX_BASE_URL = 'https://exolix.com/api/v2';
 
 /**
- * Llama a la API de SwapTitan.
- * @param path - Ruta del endpoint (ej. '/v1/swap/quote' o '/v1/swap/swap')
- * @param method - GET o POST
- * @param body - Cuerpo opcional para POST
+ * Realiza una petición a la API de Exolix.
+ * La autenticación se realiza mediante la cabecera 'Authorization'.
  */
-async function swapTitanRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: any) {
-  const url = `${SWAPTITAN_BASE_URL}${path}`;
+async function exolixRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: any) {
+  const url = `${EXOLIX_BASE_URL}${path}`;
   const options: RequestInit = {
     method,
-    headers: method === 'POST' ? { 'Content-Type': 'application/json' } : {},
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': EXOLIX_API_KEY, // Cabecera de autenticación de Exolix
+    },
   };
   if (body) {
     options.body = JSON.stringify(body);
@@ -68,12 +70,13 @@ async function swapTitanRequest(path: string, method: 'GET' | 'POST' = 'GET', bo
   try {
     json = JSON.parse(text);
   } catch {
-    console.error(`[SwapTitan] Respuesta no JSON (HTTP ${res.status}):`, text.substring(0, 300));
-    throw new Error(`SwapTitan devolvió una respuesta inesperada (HTTP ${res.status}).`);
+    console.error(`[Exolix] Respuesta no JSON (HTTP ${res.status}):`, text.substring(0, 300));
+    throw new Error(`Exolix devolvió una respuesta inesperada (HTTP ${res.status}).`);
   }
 
   if (!res.ok) {
-    throw new Error(json.error || json.message || `Error ${res.status} en SwapTitan`);
+    // Exolix devuelve un campo 'message' con el error detallado
+    throw new Error(json.message || `Error ${res.status} en Exolix`);
   }
 
   return json;
@@ -86,9 +89,8 @@ export async function POST(request: Request) {
     const upperTo = toSymbol?.toUpperCase();
     const fromConfig = NETWORKS[upperFrom];
 
-    // --- Validaciones básicas ---
     if (!upperFrom || !upperTo || !userId || !amount || amount <= 0) {
-      return NextResponse.json({ error: 'Faltan parámetros: fromSymbol, toSymbol, userId y amount son obligatorios.' }, { status: 400 });
+      return NextResponse.json({ error: 'Faltan parámetros válidos.' }, { status: 400 });
     }
 
     const db = admin.firestore();
@@ -121,27 +123,51 @@ export async function POST(request: Request) {
       await toWalletRef.set({ address: toAddress, privateKey: genData.private, createdAt: new Date().toISOString() });
     }
 
-    // --- 3. Obtener cotización de SwapTitan (cross-chain) ---
-    // Según la documentación, el endpoint de cotización cross-chain es:
-    // GET /v1/swap/quote?from=btc&to=eth&amount=1
-    // (Soporta 1288+ assets, incluyendo BTC y LTC)[reference:2]
-    const quotePath = `/v1/swap/quote?from=${upperFrom.toLowerCase()}&to=${upperTo.toLowerCase()}&amount=${amount}`;
-    console.log(`[SwapTitan] Solicitando cotización: ${quotePath}`);
-    const quote = await swapTitanRequest(quotePath);
-
-    // La respuesta de cotización debe incluir los detalles de la ruta.
-    // Asumimos que devuelve un objeto con 'fromAmount', 'toAmount', 'depositAddress', etc.
-    // Ajusta estos campos según la respuesta real de SwapTitan.
-    const depositAddress = quote.depositAddress || quote.address;
-    const expectedReceive = quote.toAmount || quote.receiveAmount;
-    const orderId = quote.orderId || quote.id;
-
-    if (!depositAddress) {
-      throw new Error('SwapTitan no devolvió una dirección de depósito válida en la cotización.');
+    // --- 3. (Recomendado) Consultar la tasa y el mínimo en Exolix ---
+    // Endpoint: GET /rate?coinFrom=btc&networkFrom=btc&coinTo=eth&networkTo=eth&amount=0.01
+    const ratePath = `/rate?coinFrom=${upperFrom.toLowerCase()}&networkFrom=${upperFrom.toLowerCase()}&coinTo=${upperTo.toLowerCase()}&networkTo=${upperTo.toLowerCase()}&amount=${amount}`;
+    let rateData: any = null;
+    try {
+      rateData = await exolixRequest(ratePath);
+      const minAmount = rateData.minAmount;
+      if (minAmount && parseFloat(amount) < parseFloat(minAmount)) {
+        return NextResponse.json({
+          error: `El monto mínimo para este par es ${minAmount} ${upperFrom}.`
+        }, { status: 400 });
+      }
+    } catch (rateError: any) {
+      // Si falla la consulta de tasa, no bloqueamos la creación de la orden; solo lo registramos.
+      console.warn(`[Exolix] No se pudo verificar la tasa/mínimo:`, rateError.message);
     }
 
-    // --- 4. Construir y firmar la transacción on-chain (envío a la dirección de depósito) ---
-    // (Esta parte se mantiene igual, usando BlockCypher para enviar los fondos)
+    // --- 4. Crear la orden de intercambio en Exolix ---
+    // Endpoint: POST /transactions
+    const orderPayload = {
+      coinFrom: upperFrom.toLowerCase(),
+      networkFrom: upperFrom.toLowerCase(), // Asumimos que la red coincide con el símbolo
+      coinTo: upperTo.toLowerCase(),
+      networkTo: upperTo.toLowerCase(),
+      amount: parseFloat(amount),
+      withdrawalAddress: toAddress,
+      rateType: 'float', // 'float' (flotante) o 'fixed' (fija)
+    };
+
+    const orderData = await exolixRequest('/transactions', 'POST', orderPayload);
+
+    // --- 5. Extraer los datos de la respuesta de Exolix ---
+    // Según la documentación, la respuesta contiene:
+    // - depositAddress (dirección donde enviar los fondos)
+    // - amountTo (cantidad estimada a recibir)
+    // - id (ID de la transacción)
+    const depositAddress = orderData.depositAddress;
+    const expectedReceive = orderData.amountTo;
+    const orderId = orderData.id;
+
+    if (!depositAddress) {
+      throw new Error('Exolix no devolvió una dirección de depósito válida.');
+    }
+
+    // --- 6. Construir y firmar la transacción on-chain (envío a la dirección de depósito) ---
     const amountSatoshi = Math.round(parseFloat(amount) * 1e8);
 
     const newTx = {
@@ -161,7 +187,7 @@ export async function POST(request: Request) {
       throw new Error(`BlockCypher: ${errMsg}`);
     }
 
-    // --- 5. Firmar cada hash "tosign" ---
+    // --- 7. Firmar cada hash "tosign" ---
     let keyPair;
     try {
       const hexKey = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
@@ -182,7 +208,7 @@ export async function POST(request: Request) {
       return encoded.toString('hex').slice(0, -2);
     });
 
-    // --- 6. Enviar transacción firmada a BlockCypher ---
+    // --- 8. Enviar transacción firmada a BlockCypher ---
     const sendRes = await fetch(`https://api.blockcypher.com/v1/${fromConfig.blockcypher}/main/txs/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -192,10 +218,10 @@ export async function POST(request: Request) {
     const finalTx = await sendRes.json();
     if (!sendRes.ok) {
       const errDetail = JSON.stringify(finalTx.errors || finalTx);
-      throw new Error(`Error al enviar a SwapTitan: ${errDetail}`);
+      throw new Error(`Error al enviar a Exolix: ${errDetail}`);
     }
 
-    // --- 7. Actualizar saldos en Firestore (transacción atómica) ---
+    // --- 9. Actualizar saldos en Firestore (transacción atómica) ---
     const fromBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperFrom);
     const toBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperTo);
 
@@ -213,7 +239,7 @@ export async function POST(request: Request) {
       t.set(toBalanceRef, { amount: currentTo + parseFloat(expectedReceive) }, { merge: true });
     });
 
-    // --- 8. Respuesta exitosa ---
+    // --- 10. Respuesta exitosa ---
     return NextResponse.json({
       success: true,
       message: `Intercambio en proceso. Enviaste ${amount} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
@@ -222,7 +248,7 @@ export async function POST(request: Request) {
     });
 
   } catch (error: any) {
-    console.error('🔥 [Error en swap con SwapTitan]:', error);
+    console.error('🔥 [Error en swap con Exolix]:', error);
     return NextResponse.json({ error: error.message || 'Error interno' }, { status: 500 });
   }
 }
