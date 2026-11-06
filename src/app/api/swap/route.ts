@@ -4,6 +4,9 @@ import * as bitcoin from 'bitcoinjs-lib';
 import ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
+// ✅ Import ESTÁTICO: el compilador de TypeScript y el bundler de Next.js
+// resuelven el módulo en tiempo de compilación.
+import { Hypermid, quoteSwap } from '@hypermid/sdk';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -83,10 +86,7 @@ export async function POST(request: Request) {
       await toWalletRef.set({ address: toAddress, privateKey: genData.private, createdAt: new Date().toISOString() });
     }
 
-    // --- 3. Import dinámico de Hypermid ---
-    const hypermidModule = await import('@hypermid/sdk');
-    const { Hypermid, quoteSwap } = hypermidModule;
-
+    // --- 3. Usar Hypermid (import estático) ---
     const hm = new Hypermid();
     const chainsResponse: any = await hm.getChains();
     const chainsList = Array.isArray(chainsResponse) ? chainsResponse : (chainsResponse.chains || []);
@@ -121,7 +121,6 @@ export async function POST(request: Request) {
     const amountInBaseUnits = BigInt(Math.round(parseFloat(amount) * Math.pow(10, decimals))).toString();
 
     // --- 5. Construir el SwapQuoteRequest ---
-    // Usamos los Asset IDs de NEAR Intents (nep141:...) para evitar errores de enrutamiento.
     const swapRequest = {
       srcChain: fromChainId,
       dstChain: toChainId,
@@ -129,7 +128,7 @@ export async function POST(request: Request) {
       tokenOut: 'nep141:btc.omft.near',  // Asset ID de BTC en NEAR Intents
       amountIn: amountInBaseUnits,
       recipient: toAddress,
-      srcAddress: fromWallet.address,    // Dirección de origen para reembolsos
+      srcAddress: fromWallet.address,
     };
 
     console.log(`[Hypermid] Solicitando cotización con quoteSwap...`);
@@ -245,11 +244,9 @@ export async function POST(request: Request) {
     } else if (error instanceof Error) {
       errorMessage = error.message || error.toString();
     } else if (typeof error === 'object' && error !== null) {
-      // Si el SDK o la API devuelven un objeto de error, intentamos extraer la info útil
       errorMessage = error.message || error.error || error.detail || error.reason || JSON.stringify(error);
     }
 
-    // Nos aseguramos de que el mensaje final sea siempre un string
     if (typeof errorMessage !== 'string') {
       errorMessage = JSON.stringify(errorMessage);
     }
