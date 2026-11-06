@@ -4,6 +4,7 @@ import * as bitcoin from 'bitcoinjs-lib';
 import ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory } from 'ecpair';
 import * as admin from 'firebase-admin';
+import { randomUUID } from 'crypto';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -42,23 +43,39 @@ const NETWORKS: Record<string, { blockcypher: string; network: any }> = {
   BTC: { blockcypher: 'btc', network: bitcoin.networks.bitcoin },
 };
 
-// --- Configuración de Exolix ---
-const EXOLIX_API_KEY = process.env.EXOLIX_API_KEY!;
-const EXOLIX_BASE_URL = 'https://exolix.com/api/v2';
+// --- Configuración de GhostSwap ---
+const GHOSTSWAP_API_BASE = 'https://partners-api.ghostswap.io';
+const GHOSTSWAP_PUBLIC_KEY = process.env.GHOSTSWAP_PUBLIC_KEY; // gspk_live_...
+const GHOSTSWAP_SECRET = process.env.GHOSTSWAP_SECRET;         // gssk_live_...
 
 /**
- * Realiza una petición a la API de Exolix.
- * La autenticación se realiza mediante la cabecera 'Authorization'.
+ * Realiza una petición a la API de GhostSwap.
+ * Si se proporcionan credenciales, añade la cabecera Authorization.
+ * El endpoint público /v1/quotes no las necesita, pero /v1/swaps sí.
  */
-async function exolixRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: any) {
-  const url = `${EXOLIX_BASE_URL}${path}`;
-  const options: RequestInit = {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': EXOLIX_API_KEY, // Cabecera de autenticación de Exolix
-    },
+async function ghostSwapRequest(
+  path: string,
+  method: 'GET' | 'POST' = 'POST',
+  body?: any,
+  requiresAuth: boolean = true
+) {
+  const url = `${GHOSTSWAP_API_BASE}${path}`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
   };
+
+  if (requiresAuth) {
+    if (!GHOSTSWAP_PUBLIC_KEY || !GHOSTSWAP_SECRET) {
+      throw new Error(
+        'Faltan GHOSTSWAP_PUBLIC_KEY y GHOSTSWAP_SECRET en las variables de entorno. ' +
+        'Regístrate en https://partners.ghostswap.io/sign-up para obtenerlas.'
+      );
+    }
+    // GhostSwap espera "Bearer publicKey:secret" (sin base64)
+    headers['Authorization'] = `Bearer ${GHOSTSWAP_PUBLIC_KEY}:${GHOSTSWAP_SECRET}`;
+  }
+
+  const options: RequestInit = { method, headers };
   if (body) {
     options.body = JSON.stringify(body);
   }
@@ -70,13 +87,12 @@ async function exolixRequest(path: string, method: 'GET' | 'POST' = 'GET', body?
   try {
     json = JSON.parse(text);
   } catch {
-    console.error(`[Exolix] Respuesta no JSON (HTTP ${res.status}):`, text.substring(0, 300));
-    throw new Error(`Exolix devolvió una respuesta inesperada (HTTP ${res.status}).`);
+    console.error(`[GhostSwap] Respuesta no JSON (HTTP ${res.status}):`, text.substring(0, 300));
+    throw new Error(`GhostSwap devolvió una respuesta inesperada (HTTP ${res.status}).`);
   }
 
   if (!res.ok) {
-    // Exolix devuelve un campo 'message' con el error detallado
-    throw new Error(json.message || `Error ${res.status} en Exolix`);
+    throw new Error(json.message || json.error || `Error ${res.status} en GhostSwap`);
   }
 
   return json;
@@ -123,51 +139,61 @@ export async function POST(request: Request) {
       await toWalletRef.set({ address: toAddress, privateKey: genData.private, createdAt: new Date().toISOString() });
     }
 
-    // --- 3. (Recomendado) Consultar la tasa y el mínimo en Exolix ---
-    // Endpoint: GET /rate?coinFrom=btc&networkFrom=btc&coinTo=eth&networkTo=eth&amount=0.01
-    const ratePath = `/rate?coinFrom=${upperFrom.toLowerCase()}&networkFrom=${upperFrom.toLowerCase()}&coinTo=${upperTo.toLowerCase()}&networkTo=${upperTo.toLowerCase()}&amount=${amount}`;
-    let rateData: any = null;
-    try {
-      rateData = await exolixRequest(ratePath);
-      const minAmount = rateData.minAmount;
-      if (minAmount && parseFloat(amount) < parseFloat(minAmount)) {
-        return NextResponse.json({
-          error: `El monto mínimo para este par es ${minAmount} ${upperFrom}.`
-        }, { status: 400 });
-      }
-    } catch (rateError: any) {
-      // Si falla la consulta de tasa, no bloqueamos la creación de la orden; solo lo registramos.
-      console.warn(`[Exolix] No se pudo verificar la tasa/mínimo:`, rateError.message);
-    }
-
-    // --- 4. Crear la orden de intercambio en Exolix ---
-    // Endpoint: POST /transactions
-    const orderPayload = {
-      coinFrom: upperFrom.toLowerCase(),
-      networkFrom: upperFrom.toLowerCase(), // Asumimos que la red coincide con el símbolo
-      coinTo: upperTo.toLowerCase(),
-      networkTo: upperTo.toLowerCase(),
-      amount: parseFloat(amount),
-      withdrawalAddress: toAddress,
-      rateType: 'float', // 'float' (flotante) o 'fixed' (fija)
+    // --- 3. Cotización pública (SIN autenticación) ---
+    // El endpoint /v1/quotes es público y devuelve amountTo, min y max.
+    const quotePayload = {
+      from: upperFrom.toLowerCase(),
+      to: upperTo.toLowerCase(),
+      amountFrom: parseFloat(amount).toString(),
     };
 
-    const orderData = await exolixRequest('/transactions', 'POST', orderPayload);
+    console.log(`[GhostSwap] Solicitando cotización pública...`);
+    const quote = await ghostSwapRequest('/v1/quotes', 'POST', quotePayload, false);
 
-    // --- 5. Extraer los datos de la respuesta de Exolix ---
-    // Según la documentación, la respuesta contiene:
-    // - depositAddress (dirección donde enviar los fondos)
-    // - amountTo (cantidad estimada a recibir)
-    // - id (ID de la transacción)
-    const depositAddress = orderData.depositAddress;
-    const expectedReceive = orderData.amountTo;
-    const orderId = orderData.id;
+    // La respuesta incluye: amountTo, rate, amountUserReceives, networkFee, min, max
+    const minAmount = parseFloat(quote.min || '0');
+    const maxAmount = parseFloat(quote.max || '0');
 
-    if (!depositAddress) {
-      throw new Error('Exolix no devolvió una dirección de depósito válida.');
+    if (minAmount > 0 && parseFloat(amount) < minAmount) {
+      return NextResponse.json({
+        error: `El monto mínimo para este par es ${minAmount} ${upperFrom}.`
+      }, { status: 400 });
+    }
+    if (maxAmount > 0 && parseFloat(amount) > maxAmount) {
+      return NextResponse.json({
+        error: `El monto máximo para este par es ${maxAmount} ${upperFrom}.`
+      }, { status: 400 });
     }
 
-    // --- 6. Construir y firmar la transacción on-chain (envío a la dirección de depósito) ---
+    const expectedReceive = parseFloat(quote.amountTo || quote.amountUserReceives || '0');
+    if (!expectedReceive) {
+      throw new Error('GhostSwap no devolvió una cantidad estimada a recibir.');
+    }
+
+    // --- 4. Crear el swap (REQUIERE autenticación) ---
+    // Endpoint: POST /v1/swaps. Requiere cabecera Idempotency-Key (UUID v4).
+    const idempotencyKey = randomUUID();
+
+    const swapPayload = {
+      from: upperFrom.toLowerCase(),
+      to: upperTo.toLowerCase(),
+      amountFrom: parseFloat(amount).toString(),
+      payoutAddress: toAddress, // Dirección de destino de los fondos
+      // refundAddress: fromWallet.address, // Opcional para float, recomendado
+    };
+
+    console.log(`[GhostSwap] Creando swap con Idempotency-Key: ${idempotencyKey}`);
+    const swapData = await ghostSwapRequest('/v1/swaps', 'POST', swapPayload, true, idempotencyKey);
+
+    // La respuesta de /v1/swaps incluye payinAddress (dirección de depósito) e id
+    const depositAddress = swapData.payinAddress;
+    const orderId = swapData.id;
+
+    if (!depositAddress) {
+      throw new Error('GhostSwap no devolvió una dirección de depósito válida (payinAddress).');
+    }
+
+    // --- 5. Construir y firmar la transacción on-chain (envío a la dirección de depósito) ---
     const amountSatoshi = Math.round(parseFloat(amount) * 1e8);
 
     const newTx = {
@@ -187,7 +213,7 @@ export async function POST(request: Request) {
       throw new Error(`BlockCypher: ${errMsg}`);
     }
 
-    // --- 7. Firmar cada hash "tosign" ---
+    // --- 6. Firmar cada hash "tosign" ---
     let keyPair;
     try {
       const hexKey = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
@@ -208,7 +234,7 @@ export async function POST(request: Request) {
       return encoded.toString('hex').slice(0, -2);
     });
 
-    // --- 8. Enviar transacción firmada a BlockCypher ---
+    // --- 7. Enviar transacción firmada a BlockCypher ---
     const sendRes = await fetch(`https://api.blockcypher.com/v1/${fromConfig.blockcypher}/main/txs/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -218,10 +244,10 @@ export async function POST(request: Request) {
     const finalTx = await sendRes.json();
     if (!sendRes.ok) {
       const errDetail = JSON.stringify(finalTx.errors || finalTx);
-      throw new Error(`Error al enviar a Exolix: ${errDetail}`);
+      throw new Error(`Error al enviar a GhostSwap: ${errDetail}`);
     }
 
-    // --- 9. Actualizar saldos en Firestore (transacción atómica) ---
+    // --- 8. Actualizar saldos en Firestore (transacción atómica) ---
     const fromBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperFrom);
     const toBalanceRef = db.collection('users').doc(userId).collection('balances').doc(upperTo);
 
@@ -236,10 +262,10 @@ export async function POST(request: Request) {
       const currentTo = toDoc.exists ? toDoc.data()?.amount || 0 : 0;
 
       t.set(fromBalanceRef, { amount: currentFrom - parseFloat(amount) }, { merge: true });
-      t.set(toBalanceRef, { amount: currentTo + parseFloat(expectedReceive) }, { merge: true });
+      t.set(toBalanceRef, { amount: currentTo + expectedReceive }, { merge: true });
     });
 
-    // --- 10. Respuesta exitosa ---
+    // --- 9. Respuesta exitosa ---
     return NextResponse.json({
       success: true,
       message: `Intercambio en proceso. Enviaste ${amount} ${upperFrom} y recibirás ≈ ${expectedReceive} ${upperTo}.`,
@@ -248,7 +274,7 @@ export async function POST(request: Request) {
     });
 
   } catch (error: any) {
-    console.error('🔥 [Error en swap con Exolix]:', error);
+    console.error('🔥 [Error en swap con GhostSwap]:', error);
     return NextResponse.json({ error: error.message || 'Error interno' }, { status: 500 });
   }
 }
