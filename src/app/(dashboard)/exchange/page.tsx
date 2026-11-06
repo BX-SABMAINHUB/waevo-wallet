@@ -124,7 +124,6 @@ export default function ExchangePage() {
         }),
       });
 
-      // --- Validación robusta de la respuesta ---
       const contentType = res.headers.get("content-type") || "";
       if (!contentType.includes("application/json")) {
         const text = await res.text();
@@ -133,12 +132,12 @@ export default function ExchangePage() {
       }
 
       const data = await res.json();
-
       if (!res.ok) {
         throw new Error(data.error || "Error al intercambiar");
       }
 
-      setSuccess(data.message);
+      // Mostramos el mensaje y, si existe, el orderId de SwapTitan
+      setSuccess(`${data.message}${data.orderId ? ` (Orden: ${data.orderId})` : ''}`);
       setAmount("");
       setFromCoin(null);
       setToCoin(null);
@@ -329,12 +328,12 @@ export default function ExchangePage() {
             <p className="text-center">
               Los intercambios son procesados de forma segura por{" "}
               <a
-                href="https://ff.io"
+                href="https://swaptitan.net"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-indigo-400 hover:underline"
               >
-                FixedFloat
+                SwapTitan
               </a>
               .
             </p>
