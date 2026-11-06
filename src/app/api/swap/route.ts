@@ -88,10 +88,24 @@ export async function POST(request: Request) {
     }
 
     // --- 3. Obtener los IDs de cadena de Hypermid dinámicamente ---
-    // Esto evita "hardcodear" IDs y permite que Hypermid añada nuevas cadenas (como LTC) sin tocar el código.
-    const { chains } = await hm.getChains();
-    const fromChainInfo = chains.find((c: any) => c.native?.symbol?.toUpperCase() === upperFrom);
-    const toChainInfo = chains.find((c: any) => c.native?.symbol?.toUpperCase() === upperTo);
+    // Casteamos la respuesta a 'any' para evitar problemas de tipado con la librería
+    const chainsResponse: any = await hm.getChains();
+    const chainsList = Array.isArray(chainsResponse) ? chainsResponse : (chainsResponse.chains || []);
+
+    if (!Array.isArray(chainsList)) {
+      throw new Error('Hypermid devolvió un formato de cadenas inesperado.');
+    }
+
+    // Buscamos la cadena de origen y destino extrayendo el símbolo del objeto nativo
+    const fromChainInfo: any = chainsList.find((c: any) => {
+      const symbol = (c?.native as any)?.symbol || c?.symbol || c?.ticker;
+      return symbol && symbol.toUpperCase() === upperFrom;
+    });
+
+    const toChainInfo: any = chainsList.find((c: any) => {
+      const symbol = (c?.native as any)?.symbol || c?.symbol || c?.ticker;
+      return symbol && symbol.toUpperCase() === upperTo;
+    });
 
     if (!fromChainInfo) {
       throw new Error(`Hypermid no soporta la cadena de origen ${upperFrom}.`);
@@ -100,15 +114,16 @@ export async function POST(request: Request) {
       throw new Error(`Hypermid no soporta la cadena de destino ${upperTo}.`);
     }
 
-    const fromChainId = fromChainInfo.chainId;
-    const toChainId = toChainInfo.chainId;
+    const fromChainId = fromChainInfo.chainId || fromChainInfo.id;
+    const toChainId = toChainInfo.chainId || toChainInfo.id;
 
     // --- 4. Convertir la cantidad a unidades base (satoshis para BTC/LTC) ---
-    // Hypermid espera el monto en la unidad mínima de la cadena (wei para EVM, satoshis para Bitcoin).
-    const decimals = fromChainInfo.native.decimals || 8;
+    // Hacemos un cast a 'any' de la propiedad 'native' para solucionar el error de compilación
+    const nativeInfo = fromChainInfo.native as any;
+    const decimals = nativeInfo?.decimals || 8;
     const amountInBaseUnits = BigInt(Math.round(parseFloat(amount) * Math.pow(10, decimals))).toString();
 
-    // Los tokens nativos suelen representarse con la dirección "native" o "0x0000000000000000000000000000000000000000"
+    // Los tokens nativos suelen representarse con la dirección "native"
     const fromTokenAddress = "native";
     const toTokenAddress = "native";
 
@@ -129,13 +144,11 @@ export async function POST(request: Request) {
     }
 
     // --- 6. Ejecutar el swap en Hypermid ---
-    // Para cadenas no-EVM (como Bitcoin), execute devuelve una dirección de depósito.
     console.log(`[Hypermid] Ejecutando cotización ${quote.id}...`);
     const exec = await hm.execute({ quoteId: quote.id });
 
-    // La respuesta de execute puede tener 'depositAddress' (para BTC/LTC) o 'tx' (para EVM).
     const depositAddress = exec.depositAddress;
-    const expectedReceive = exec.toAmount || quote.toAmount; // Dependiendo de la versión del SDK
+    const expectedReceive = exec.toAmount || quote.toAmount;
 
     if (!depositAddress) {
       throw new Error('Hypermid no devolvió una dirección de depósito (depositAddress). Es posible que esta ruta requiera una transacción EVM.');
@@ -223,7 +236,6 @@ export async function POST(request: Request) {
 
   } catch (error: any) {
     console.error('🔥 [Error en swap con Hypermid]:', error);
-    // Si el error menciona que no se soporta LTC, lo indicamos claramente.
     if (error.message.includes('no soporta')) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
