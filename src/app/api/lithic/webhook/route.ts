@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
-import * as admin from 'firebase-admin';
+import { getAdmin } from '@/lib/firebase-admin';
 
-// ... inicialización de Firebase Admin ...
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {
   const body = await req.json();
@@ -14,7 +15,7 @@ export async function POST(req: Request) {
     const cardToken = auth.card_token;
     const amount = auth.amount; // El importe suele venir en la unidad monetaria más pequeña (céntimos).
 
-    const db = admin.firestore();
+    const db = getAdmin().firestore();
 
     // 1. Encontrar al usuario por el token de la tarjeta
     const usersSnap = await db.collection('users').where('lithicCardToken', '==', cardToken).limit(1).get();

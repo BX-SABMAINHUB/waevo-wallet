@@ -5,7 +5,6 @@ export const metadata: Metadata = {
   title: "Waevo Wallet — Tu billetera cripto del futuro",
   description:
     "Explora, envía y recibe criptomonedas con la billetera más rápida y segura. No custodiada, con 2FA obligatorio.",
-  icons: { icon: "/favicon.ico" },
 };
 
 export default function RootLayout({
