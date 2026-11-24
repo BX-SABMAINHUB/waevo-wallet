@@ -1,8 +1,16 @@
 import { NextResponse } from 'next/server';
 import * as admin from 'firebase-admin';
-import { Lithic } from 'lithic'; // Asumiendo que existe un SDK oficial. Si no, usa fetch a la API REST.
 
-const lithic = new Lithic(process.env.LITHIC_API_KEY!);
+async function lithicPost(path: string, body: Record<string, unknown>): Promise<any> {
+  const res = await fetch(`https://api.lithic.com/v1${path}`, {
+    method: 'POST',
+    headers: { Authorization: process.env.LITHIC_API_KEY ?? '', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.message || `Lithic error ${res.status}`);
+  return data;
+}
 
 // ... inicialización de Firebase Admin ...
 
@@ -22,7 +30,7 @@ export async function POST(req: Request) {
 
     // 2. Crear el "Cardholder" en Lithic
     // Asumiendo que usas KYC_BYO o que tus usuarios ya están verificados.
-    const cardholder = await lithic.cardholders.create({
+    const cardholder = await lithicPost('/account_holders', {
       type: 'INDIVIDUAL',
       // ... datos del usuario (nombre, email, etc.) ...
       kyc_exemption_type: 'KYC_BYO', // O el tipo que corresponda
@@ -30,8 +38,8 @@ export async function POST(req: Request) {
     });
 
     // 3. Crear la tarjeta virtual
-    const card = await lithic.cards.create({
-      cardholder_token: cardholder.token, // o el ID que devuelva
+    const card = await lithicPost('/cards', {
+      account_token: cardholder.account_token ?? cardholder.token, // o el ID que devuelva
       type: 'VIRTUAL',
       state: 'OPEN',
       // ...
